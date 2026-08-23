@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "realistic-cost-tui",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode TUI plugin — realistic human-team cost estimate in the sidebar",
+  "exports": {
+    "./tui": {
+      "import": "./plugins/realistic-cost-tui.tsx"
+    }
+  },
+  "dependencies": {
+    "@opentui/core": "^0.4.5",
+    "@opentui/solid": "^0.4.5",
+    "solid-js": "^1.9.12"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.4.3"
+  }
+}
