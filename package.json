@@ -1,0 +1,55 @@
+{
+  "name": "realistic-cost",
+  "version": "0.2.0",
+  "description": "Realistic human-engineering-team cost estimator. Computes what a 100% human-driven team would cost across all job functions (EM, backend, frontend, design, QA, PM, DevOps, security, data, tech writing) and the real-world calendar time the work would take.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "realistic-cost": "./dist/bin/realistic-cost.js"
+  },
+  "main": "./dist/core/index.js",
+  "types": "./dist/core/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/core/index.js",
+      "types": "./dist/core/index.d.ts"
+    },
+    "./core": {
+      "import": "./dist/core/index.js",
+      "types": "./dist/core/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/bin/realistic-cost.ts",
+    "test": "node --test --import tsx test/smoke.test.ts test/estimate.test.ts test/cost.test.ts test/rates.test.ts test/transcript.test.ts test/cli.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "files": [
+    "dist",
+    "claude-code",
+    "README.md"
+  ],
+  "dependencies": {
+    "commander": "^12.1.0",
+    "kleur": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "keywords": [
+    "claude-code",
+    "cost",
+    "estimate",
+    "engineering",
+    "team",
+    "plugin",
+    "statusline"
+  ]
+}
