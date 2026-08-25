@@ -3,7 +3,7 @@
   "name": "pre-ai-dev-cost-receipt",
   "owner": {
     "name": "Oshri Cohen",
-    "url": "https://github.com/oshricohenme"
+    "url": "https://oshricohen.me"
   },
   "description": "Marketplace for realistic-cost — the pre-AI human engineering cost receipt for Claude Code sessions.",
   "version": "0.4.0",
@@ -16,7 +16,7 @@
       "version": "0.4.0",
       "author": {
         "name": "Oshri Cohen",
-        "url": "https://github.com/oshricohenme"
+        "url": "https://oshricohen.me"
       },
       "homepage": "https://github.com/oshricohenme/claude_plugin_realistic_cost#readme",
       "repository": "https://github.com/oshricohenme/claude_plugin_realistic_cost",
