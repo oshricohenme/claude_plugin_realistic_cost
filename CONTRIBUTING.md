@@ -51,7 +51,7 @@ Everything else is a thin adapter over it:
 - `src/cli/` — the `realistic-cost` command
 - `claude-code/` — status line, Stop hook, slash command, installers
 - `opencode/plugins/realistic-cost-tui.tsx` — reads opencode session state,
-  renders the TUI, and **imports** `realistic-cost/core`
+  renders the TUI, and **imports** `pre_ai_dev_cost_receipt/core`
 
 The opencode plugin used to inline its own copy of the engine. It drifted — the
 two produced different totals for the same session — so the copy was deleted.

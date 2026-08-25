@@ -4,7 +4,10 @@
   "description": "Estimate what a 100% human-driven engineering team would have cost to produce the work in an AI coding session — across every job function (PM, EM, design, backend, frontend, QA, DevOps, security, data, tech writing) — as a terminal receipt, status line, or exported report.",
   "type": "module",
   "license": "MIT",
-  "author": "Oshri Cohen",
+  "author": {
+    "name": "Oshri Cohen",
+    "url": "https://oshricohen.me"
+  },
   "homepage": "https://github.com/oshricohenme/claude_plugin_realistic_cost#readme",
   "repository": {
     "type": "git",
