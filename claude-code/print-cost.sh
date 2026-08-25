@@ -70,6 +70,7 @@ echo 0 > "$COUNTER_FILE"
 
 # Resolve the realistic-cost binary from the usual global install locations.
 RC_BIN=""
+RC_ARGS=()
 if command -v realistic-cost >/dev/null 2>&1; then
   RC_BIN="realistic-cost"
 elif [ -x "$HOME/.npm-global/bin/realistic-cost" ]; then
@@ -78,16 +79,32 @@ elif [ -x "$HOME/.claude/realistic-cost" ]; then
   RC_BIN="$HOME/.claude/realistic-cost"
 elif [ -x "$HOME/.local/bin/realistic-cost" ]; then
   RC_BIN="$HOME/.local/bin/realistic-cost"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
+  && [ -f "$CLAUDE_PLUGIN_ROOT/dist/bin/realistic-cost.js" ] \
+  && command -v node >/dev/null 2>&1; then
+  # Installed as a Claude Code plugin from a source that ships a build
+  # (npm tarball, or a clone that has been built).
+  RC_BIN="node"
+  RC_ARGS=("$CLAUDE_PLUGIN_ROOT/dist/bin/realistic-cost.js")
 fi
 
 # Forward the captured hook payload to the CLI; it reads the JSON, extracts
 # transcript_path, parses the transcript, and prints the status line.
 # No npx fallback on purpose: a hook that runs every few turns must not
-# resolve a package from the registry. If the CLI is not installed, stay quiet.
+# resolve a package from the registry.
+#
+# If the CLI is not installed, say so exactly once per session rather than
+# failing silently — a plugin that quietly does nothing is worse than one that
+# tells you the single command that fixes it.
 if [ -z "$RC_BIN" ]; then
+  HINT_FILE="$STATE_DIR/hint-${SAFE_KEY}"
+  if [ ! -f "$HINT_FILE" ]; then
+    : > "$HINT_FILE" 2>/dev/null || true
+    printf '%s\n' "realistic-cost: CLI not found — run 'npm install -g pre_ai_dev_cost_receipt' to enable the cost receipt."
+  fi
   exit 0
 fi
-OUTPUT="$(printf '%s' "$INPUT" | "$RC_BIN" status 2>/dev/null)" || true
+OUTPUT="$(printf '%s' "$INPUT" | "$RC_BIN" "${RC_ARGS[@]+"${RC_ARGS[@]}"}" status 2>/dev/null)" || true
 
 if [ -n "$OUTPUT" ]; then
   printf '%s\n' "$OUTPUT"

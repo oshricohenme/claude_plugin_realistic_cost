@@ -1,7 +1,7 @@
 {
-  "name": "realistic-cost",
-  "version": "0.3.0",
-  "description": "Estimate what a 100% human-driven engineering team would have cost to produce the work in an AI coding session \u2014 across every job function (PM, EM, design, backend, frontend, QA, DevOps, security, data, tech writing) \u2014 as a terminal receipt, status line, or exported report.",
+  "name": "pre_ai_dev_cost_receipt",
+  "version": "0.4.0",
+  "description": "Estimate what a 100% human-driven engineering team would have cost to produce the work in an AI coding session — across every job function (PM, EM, design, backend, frontend, QA, DevOps, security, data, tech writing) — as a terminal receipt, status line, or exported report.",
   "type": "module",
   "license": "MIT",
   "author": "Oshri Cohen",
@@ -46,6 +46,7 @@
     "typecheck:opencode": "tsc --noEmit -p tsconfig.opencode.json"
   },
   "files": [
+    ".claude-plugin",
     "dist",
     "claude-code",
     "opencode/plugins",
@@ -80,6 +81,8 @@
     "team",
     "plugin",
     "statusline",
-    "ai-coding"
+    "ai-coding",
+    "claude-code-plugin",
+    "marketplace"
   ]
 }

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-25
+
+Distribution release. The project is now installable as a first-class Claude
+Code plugin, and the npm package has been renamed.
+
+### Added
+
+- **Claude Code plugin marketplace.** The repository hosts its own marketplace,
+  so installation no longer requires a clone:
+
+  ```
+  /plugin marketplace add oshricohenme/claude_plugin_realistic_cost
+  /plugin install realistic-cost@pre-ai-dev-cost-receipt
+  ```
+
+  `.claude-plugin/plugin.json` registers the `/realistic-cost` skill and the
+  `Stop` hook; `.claude-plugin/marketplace.json` is the catalog. The plugin
+  writes nothing to `settings.json` and adds no permission entries.
+
+- **Plugin-root CLI resolution.** `statusline.sh` and `print-cost.sh` now also
+  resolve `${CLAUDE_PLUGIN_ROOT}/dist/bin/realistic-cost.js`, so a plugin
+  install that ships a build works without a global link.
+- **The Stop hook no longer fails silently.** If the CLI cannot be found it
+  prints the one command that fixes it, once per session, then stays quiet.
+
+### Changed
+
+- **The npm package is now `pre_ai_dev_cost_receipt`** (was `realistic-cost`).
+  The binary, the skill and the slash command are all still `realistic-cost` —
+  only the published package name changed.
+
+  ```bash
+  npm uninstall -g realistic-cost
+  npm install -g pre_ai_dev_cost_receipt
+  ```
+
+  The programmatic import path changes with it:
+  `import { … } from "pre_ai_dev_cost_receipt/core"`.
+
+### Notes
+
+- **The status line is still not part of the plugin.** Claude Code plugins
+  cannot declare a `statusLine`; use `./claude-code/install.sh` or wire it into
+  `settings.json` by hand.
+
 ## [0.3.0] - 2026-08-24
 
 Correctness and safety release. Two of these were capable of damaging a user's

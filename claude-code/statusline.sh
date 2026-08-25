@@ -26,7 +26,16 @@ if [ -x "$HOME/.local/bin/realistic-cost" ]; then
   exec "$HOME/.local/bin/realistic-cost" status
 fi
 
-# 3. Repo-local dev build (when Claude Code is running inside a clone of this
+# 3. Plugin install that ships a build (npm tarball source, or a built clone
+#    registered as a local marketplace). CLAUDE_PLUGIN_ROOT is only set when
+#    this script is invoked through the plugin.
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
+  && [ -f "$CLAUDE_PLUGIN_ROOT/dist/bin/realistic-cost.js" ] \
+  && command -v node >/dev/null 2>&1; then
+  exec node "$CLAUDE_PLUGIN_ROOT/dist/bin/realistic-cost.js" status
+fi
+
+# 4. Repo-local dev build (when Claude Code is running inside a clone of this
 #    repo). Paths are quoted so a checkout under a directory with spaces works.
 if [ -x "$PWD/node_modules/.bin/realistic-cost" ]; then
   exec "$PWD/node_modules/.bin/realistic-cost" status
