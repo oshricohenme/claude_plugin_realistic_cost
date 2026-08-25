@@ -71,7 +71,16 @@ echo 0 > "$COUNTER_FILE"
 # Resolve the realistic-cost binary from the usual global install locations.
 RC_BIN=""
 RC_ARGS=()
-if command -v realistic-cost >/dev/null 2>&1; then
+if [ -n "${RC_DEV:-}" ]; then
+  # RC_DEV (set by ./dev.sh claude) is an explicit dev override and wins over
+  # any global copy. It may be a multi-word command ("node /path/x.js"), so it
+  # is split on whitespace on purpose. The script takes no positional
+  # arguments, so reusing $@ to do the splitting is safe.
+  set -- $RC_DEV
+  RC_BIN="$1"
+  shift
+  RC_ARGS=("$@")
+elif command -v realistic-cost >/dev/null 2>&1; then
   RC_BIN="realistic-cost"
 elif [ -x "$HOME/.npm-global/bin/realistic-cost" ]; then
   RC_BIN="$HOME/.npm-global/bin/realistic-cost"

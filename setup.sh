@@ -126,7 +126,7 @@ install_claude_code() {
   install -m 0755 "$REPO_DIR/claude-code/print-cost.sh" "$CLAUDE_DIR/print-cost.sh"
   # rm first: `cp -R src dst` nests into dst when dst exists, so a second run
   # would otherwise create skills/realistic-cost/realistic-cost/.
-  rm -rf "$CLAUDE_DIR/skills/realistic-cost"
+  rm -rf "${CLAUDE_DIR:?}/skills/realistic-cost"
   cp -R "$REPO_DIR/claude-code/skills/realistic-cost" "$CLAUDE_DIR/skills/realistic-cost"
   c_green "  ✓ statusline.sh + print-cost.sh + skill installed"
 
@@ -146,7 +146,7 @@ install_opencode() {
 
   # Skill (slash command). rm first — see the note in install_claude_code.
   mkdir -p "$OPENCODE_DIR/skills"
-  rm -rf "$OPENCODE_DIR/skills/realistic-cost"
+  rm -rf "${OPENCODE_DIR:?}/skills/realistic-cost"   # see note in install_claude_code
   cp -R "$REPO_DIR/opencode/skills/realistic-cost" "$OPENCODE_DIR/skills/realistic-cost"
   c_green "  ✓ skill installed ($OPENCODE_DIR/skills/realistic-cost/SKILL.md)"
 
@@ -185,6 +185,8 @@ main() {
   c_bold "realistic-cost setup"
   c_dim  "repo: $REPO_DIR"
   echo
+
+  require_tty
 
   local sel
   case "$TARGET" in

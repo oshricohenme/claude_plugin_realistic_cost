@@ -177,11 +177,14 @@ function findChrome(): string | null {
  * Chrome refuses to start as root without --no-sandbox, which is the usual
  * situation inside a container. Everywhere else the sandbox stays ON: this
  * renders a local file we generated, so there is no reason to disable a
- * security boundary by default.
+ * security boundary by default. REALISTIC_COST_NO_SANDBOX=1 is the manual
+ * escape hatch for sandbox-less environments we fail to detect.
  */
 function needsNoSandbox(): boolean {
+  if (process.env.REALISTIC_COST_NO_SANDBOX === "1") return true
   if (process.platform === "win32") return false
-  return typeof process.getuid === "function" && process.getuid() === 0
+  const asRoot = typeof process.getuid === "function" && process.getuid() === 0
+  return asRoot || existsSync("/.dockerenv")
 }
 
 function chromeHeadlessArgs(binary: string): string[] {
@@ -192,6 +195,14 @@ function chromeHeadlessArgs(binary: string): string[] {
   const isBrave = /brave/i.test(binary)
   const headless = isEdge || isBrave ? "--headless" : "--headless=new"
   const args = [headless, "--disable-gpu", "--hide-scrollbars"]
+  // --no-sandbox disables Chrome's sandbox for every render, which is not
+  // something a local tool should do by default. It is only *needed* where
+  // Chrome refuses to start otherwise — as root, or inside a container.
   if (needsNoSandbox()) args.push("--no-sandbox")
   return args
+}
+
+// Helper for callers that just want HTML bytes
+export function renderHtml(report: CostReport): string {
+  return formatHtml(report)
 }

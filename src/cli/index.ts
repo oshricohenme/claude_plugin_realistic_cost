@@ -268,35 +268,49 @@ function buildReport(input: StatusLineInput, opts: CliOpts, useCache: boolean): 
 // Stdin reader
 // ---------------------------------------------------------------------------
 
-/**
- * Read the status-line JSON from stdin.
- *
- * `isTTY` is not a sufficient guard: when the CLI is launched from an agent
- * harness, a hook, or CI, stdin is a pipe that is open but that nobody ever
- * writes to or closes — waiting for "end" there hangs forever. So we also give
- * up if no byte has arrived within `STDIN_FIRST_BYTE_TIMEOUT_MS`. Once data
- * starts flowing we wait for the real end of stream.
- */
-const STDIN_FIRST_BYTE_TIMEOUT_MS = 150
+// `isTTY` is false whenever stdin is a pipe — including an *open pipe with no
+// writer*, which is how agent harnesses (and CI) commonly invoke a CLI. Waiting
+// on "end" there never returns, so `realistic-cost review` would hang forever.
+// Bound the wait: if nothing arrives promptly, treat it as "no piped input".
+const STDIN_IDLE_MS = Number(process.env.REALISTIC_COST_STDIN_TIMEOUT_MS ?? 250)
 
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return ""
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let settled = false
-    const done = () => {
+
+    const finish = (value: string) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      process.stdin.removeListener("data", onData)
+      process.stdin.removeListener("end", onEnd)
+      process.stdin.removeListener("error", onError)
       process.stdin.pause()
-      resolve(Buffer.concat(chunks).toString("utf8"))
+      // pause() alone still leaves the handle referenced, so an open-but-idle
+      // pipe keeps the event loop alive and the process never exits. unref()
+      // exists on socket/pipe stdin but not when stdin is a plain file
+      // (`< /dev/null`, `< file`), where the loop is not held open anyway.
+      const stdin = process.stdin as NodeJS.ReadStream & { unref?: () => void }
+      if (typeof stdin.unref === "function") stdin.unref()
+      resolve(value)
     }
-    const timer = setTimeout(() => {
-      if (chunks.length === 0) done()
-    }, STDIN_FIRST_BYTE_TIMEOUT_MS)
-    process.stdin.on("data", (c: Buffer) => chunks.push(c))
-    process.stdin.on("end", done)
-    process.stdin.on("error", done)
+
+    const collected = () => Buffer.concat(chunks).toString("utf8")
+    // Re-armed on every chunk, so a slow writer is not cut off mid-stream.
+    let timer = setTimeout(() => finish(collected()), STDIN_IDLE_MS)
+    const onData = (c: Buffer) => {
+      chunks.push(c)
+      clearTimeout(timer)
+      timer = setTimeout(() => finish(collected()), STDIN_IDLE_MS)
+    }
+    const onEnd = () => finish(collected())
+    const onError = () => finish("")
+
+    process.stdin.on("data", onData)
+    process.stdin.on("end", onEnd)
+    process.stdin.on("error", onError)
   })
 }
 

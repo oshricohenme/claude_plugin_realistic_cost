@@ -150,6 +150,60 @@ test("Edit counts oldString as removed and newString as added", () => {
   })
 })
 
+// Claude Code's real Edit/MultiEdit inputs are snake_case. The camelCase tests
+// above are legacy fixture shapes; these pin the spelling that actually ships.
+test("Edit counts real snake_case old_string/new_string", () => {
+  const edit = {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "u1",
+          name: "Edit",
+          input: { file_path: "src/a.ts", old_string: "x\ny\n", new_string: "p\nq\nr\n" },
+        },
+      ],
+    },
+  }
+  withTempTranscript(jsonl([edit]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.fileWrites[0].linesRemoved, 2)
+    strictEqual(s.fileWrites[0].linesAdded, 3)
+    strictEqual(s.linesAdded, 3, "snake_case edits must reach the session total")
+  })
+})
+
+test("MultiEdit sums across snake_case edits array", () => {
+  const multi = {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "u1",
+          name: "MultiEdit",
+          input: {
+            file_path: "src/a.ts",
+            edits: [
+              { old_string: "a\n", new_string: "b\nc\n" },
+              { old_string: "d", new_string: "e\nf" },
+            ],
+          },
+        },
+      ],
+    },
+  }
+  withTempTranscript(jsonl([multi]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.fileWrites[0].linesAdded, 4)
+    strictEqual(s.fileWrites[0].linesRemoved, 2)
+    strictEqual(s.toolCalls.edit, 1)
+  })
+})
+
 test("MultiEdit sums across its edits array", () => {
   const multi = {
     type: "assistant",

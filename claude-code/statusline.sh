@@ -16,6 +16,12 @@
 # that loop would be both slow and a supply-chain risk. Install the CLI once
 # (./claude-code/install.sh) instead.
 
+# 0. Explicit dev override (set by ./dev.sh claude) — always wins, so a local
+#    working-tree build is never shadowed by a globally installed copy.
+if [ -n "${RC_DEV:-}" ]; then
+  exec $RC_DEV status
+fi
+
 # 1. Global install on PATH (preferred)
 if command -v realistic-cost >/dev/null 2>&1; then
   exec realistic-cost status

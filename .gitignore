@@ -22,5 +22,11 @@ Thumbs.db
 
 # Agent scratch
 .context/
+
+# Dev-mode scratch (./dev.sh claude)
+/.dev/
+/.claude/skills/realistic-cost
+
+# Tooling scratch
 .serena/
 .claude/settings.local.json
