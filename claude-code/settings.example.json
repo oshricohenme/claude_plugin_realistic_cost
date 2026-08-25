@@ -17,12 +17,5 @@
         ]
       }
     ]
-  },
-  "permissions": {
-    "allow": [
-      "Bash(realistic-cost:*)",
-      "Bash(~/.claude/statusline.sh:*)",
-      "Bash(~/.claude/print-cost.sh:*)"
-    ]
   }
 }

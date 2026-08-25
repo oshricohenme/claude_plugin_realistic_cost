@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # uninstall.sh — remove the realistic-cost Claude Code integration.
 #
-# Reverses install.sh: removes statusline.sh, print-cost.sh, and the skill
-# from ~/.claude/, removes the statusLine / Stop-hook / permission entries
-# from settings.json (backing it up first), and unlinks the global CLI.
+# Reverses install.sh: removes statusline.sh, print-cost.sh and the skill from
+# ~/.claude/, restores whatever statusLine you had before installing, removes
+# only our Stop-hook entry (leaving your other hooks intact), drops our
+# permission entries, and unlinks the global CLI.
+#
 # Re-runnable; exits cleanly if nothing is installed.
 set -euo pipefail
 
@@ -18,36 +20,18 @@ rm -f "$CLAUDE_DIR/statusline.sh" "$CLAUDE_DIR/print-cost.sh"
 rm -rf "$CLAUDE_DIR/skills/realistic-cost"
 c_green "  ✓ statusline.sh, print-cost.sh, skills/realistic-cost removed"
 
-SETTINGS="$CLAUDE_DIR/settings.json"
-if [ -f "$SETTINGS" ]; then
+# Per-session Stop-hook counters (see print-cost.sh).
+rm -f "${TMPDIR:-/tmp}"/realistic-cost-stop-* 2>/dev/null || true
+rm -f "${TMPDIR:-/tmp}"/realistic-cost-cache-*.json 2>/dev/null || true
+c_green "  ✓ temp counters and parse cache cleared"
+
+if [ -f "$CLAUDE_DIR/settings.json" ]; then
   if command -v node >/dev/null 2>&1; then
-    cp "$SETTINGS" "$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
-    node -e '
-      const fs = require("fs");
-      const p = process.argv[1];
-      const s = JSON.parse(fs.readFileSync(p, "utf8"));
-      delete s.statusLine;
-      if (s.hooks?.Stop) {
-        s.hooks.Stop = s.hooks.Stop.filter(
-          (h) => !(h.hooks || []).some(
-            (x) => typeof x.command === "string" && x.command.includes("print-cost.sh"),
-          ),
-        );
-        if (s.hooks.Stop.length === 0) delete s.hooks.Stop;
-        if (Object.keys(s.hooks).length === 0) delete s.hooks;
-      }
-      if (s.permissions?.allow) {
-        s.permissions.allow = s.permissions.allow.filter(
-          (a) => !["Bash(realistic-cost:*)", "Bash(~/.claude/statusline.sh:*)", "Bash(~/.claude/print-cost.sh:*)"].includes(a),
-        );
-        if (s.permissions.allow.length === 0) delete s.permissions.allow;
-        if (Object.keys(s.permissions).length === 0) delete s.permissions;
-      }
-      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-    ' "$SETTINGS"
-    c_green "  ✓ settings.json cleaned (backup saved alongside)"
+    echo "▸ Updating $CLAUDE_DIR/settings.json ..."
+    node "$REPO_DIR/claude-code/configure-settings.mjs" uninstall "$CLAUDE_DIR/settings.json"
+    c_green "  ✓ settings.json cleaned"
   else
-    c_yellow "  ! node not found — remove the statusLine and hooks.Stop keys from $SETTINGS manually"
+    c_yellow "  ! node not found — remove the statusLine and hooks.Stop entries from settings.json manually"
   fi
 fi
 

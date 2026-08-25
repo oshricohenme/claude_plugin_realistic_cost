@@ -11,7 +11,6 @@ import {
   formatMarkdown,
   formatHtml,
   classifyDomain,
-  type StatusLineInput,
 } from "../src/core/index.js"
 import { renderTerminal } from "../src/cli/render.js"
 
@@ -21,7 +20,10 @@ import { renderTerminal } from "../src/cli/render.js"
 // we emit a few writes, reads, a grep, and a bash call + a thinking turn.
 // ---------------------------------------------------------------------------
 
-function assistantLine(toolUses: Array<{ id: string; name: string; input: Record<string, unknown> }>, withThinking = true): string {
+function assistantLine(
+  toolUses: Array<{ id: string; name: string; input: Record<string, unknown> }>,
+  withThinking = true,
+): string {
   const content: unknown[] = []
   if (withThinking) content.push({ type: "thinking", thinking: "planning..." })
   content.push({ type: "text", text: "ok" })
@@ -48,11 +50,7 @@ function buildTranscript(): string {
   )
   lines.push(userResultLine("u1"))
   lines.push(userResultLine("u2"))
-  lines.push(
-    assistantLine([
-      { id: "u3", name: "Read", input: { filePath: "src/old.ts" } },
-    ]),
-  )
+  lines.push(assistantLine([{ id: "u3", name: "Read", input: { filePath: "src/old.ts" } }]))
   lines.push(userResultLine("u3"))
   lines.push(
     assistantLine([

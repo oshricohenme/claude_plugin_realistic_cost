@@ -5,7 +5,8 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "no
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProgram, getVersion } from "../src/cli/index.js"
+import { MODEL_FLAGS, createProgram, getVersion } from "../src/cli/index.js"
+import { ESTIMATE_DEFAULTS } from "../src/core/index.js"
 import type { CostReport } from "../src/core/index.js"
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,9 @@ import type { CostReport } from "../src/core/index.js"
 // ---------------------------------------------------------------------------
 
 test("CLI version matches package.json", () => {
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: string
+  }
   strictEqual(getVersion(), pkg.version)
 })
 
@@ -32,23 +35,35 @@ function testProgram() {
 
 test("non-numeric --lines-added is rejected with a helpful error", async () => {
   const program = testProgram()
-  await assertRejectsMessage(program.parseAsync(["status", "--lines-added", "abc"], { from: "user" }), /must be a number/)
+  await assertRejectsMessage(
+    program.parseAsync(["status", "--lines-added", "abc"], { from: "user" }),
+    /must be a number/,
+  )
 })
 
 test("negative --ai-cost is rejected", async () => {
   const program = testProgram()
   // =-5 form: commander would otherwise treat a bare "-5" as a flag
-  await assertRejectsMessage(program.parseAsync(["status", "--ai-cost=-5"], { from: "user" }), /must be a number/)
+  await assertRejectsMessage(
+    program.parseAsync(["status", "--ai-cost=-5"], { from: "user" }),
+    /must be a number/,
+  )
 })
 
 test("fractional --duration-ms is rejected", async () => {
   const program = testProgram()
-  await assertRejectsMessage(program.parseAsync(["status", "--duration-ms", "1.5"], { from: "user" }), /must be an integer/)
+  await assertRejectsMessage(
+    program.parseAsync(["status", "--duration-ms", "1.5"], { from: "user" }),
+    /must be an integer/,
+  )
 })
 
 test("--hours-per-day below 1 is rejected", async () => {
   const program = testProgram()
-  await assertRejectsMessage(program.parseAsync(["status", "--hours-per-day", "0"], { from: "user" }), /hours-per-day/)
+  await assertRejectsMessage(
+    program.parseAsync(["status", "--hours-per-day", "0"], { from: "user" }),
+    /hours-per-day/,
+  )
 })
 
 async function assertRejectsMessage(p: Promise<unknown>, re: RegExp): Promise<void> {
@@ -80,7 +95,15 @@ function tempTranscript(): string {
   const dir = mkdtempSync(join(tmpdir(), "rc-cli-"))
   const tp = join(dir, "session.jsonl")
   const lines = [
-    { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "u1", name: "Write", input: { filePath: "src/api.ts", content: "a\nb\n" } }] } },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "u1", name: "Write", input: { filePath: "src/api.ts", content: "a\nb\n" } },
+        ],
+      },
+    },
   ]
   writeFileSync(tp, lines.map((l) => JSON.stringify(l)).join("\n") + "\n")
   return tp
@@ -89,7 +112,10 @@ function tempTranscript(): string {
 test("status --json produces a full report from stdin JSON", () => {
   const tp = tempTranscript()
   try {
-    const input = JSON.stringify({ transcript_path: tp, cost: { total_lines_added: 2, total_cost_usd: 0.42 } })
+    const input = JSON.stringify({
+      transcript_path: tp,
+      cost: { total_lines_added: 2, total_cost_usd: 0.42 },
+    })
     const { stdout, status, stderr } = runCli(["status", "--json", "--no-cache"], input)
     strictEqual(status, 0, `CLI exited cleanly (stderr: ${stderr})`)
     const report = JSON.parse(stdout) as CostReport
@@ -116,8 +142,11 @@ test("status prints a one-line statusline and caches the transcript parse", () =
     const second = runCli(["status"], input)
     strictEqual(second.status, 0)
     strictEqual(second.stdout, first.stdout, "cached run produces identical output")
-    const key = createHash("sha1").update(tp).digest("hex").slice(0, 20)
-    ok(existsSync(join(tmpdir(), `realistic-cost-cache-${key}.json`)), "cache file written")
+    // Cache lives in a private per-user directory, not loose in the shared
+    // temp dir (see cacheDir() in src/cli/index.ts).
+    const key = createHash("sha256").update(tp).digest("hex").slice(0, 20)
+    const dir = join(tmpdir(), `realistic-cost-${process.getuid?.() ?? "user"}`)
+    ok(existsSync(join(dir, `cache-${key}.json`)), "cache file written")
   } finally {
     rmSync(join(tp, ".."), { recursive: true, force: true })
   }
@@ -141,4 +170,41 @@ test("invalid numeric flag fails with exit code 2 and a stderr message", () => {
   const { status, stderr } = runCli(["status", "--lines-added", "abc"], "{}")
   strictEqual(status, 1, "commander validation failure exit code")
   ok(stderr.includes("must be a number"), `stderr explains the problem: "${stderr.trim()}"`)
+})
+
+// ---------------------------------------------------------------------------
+// Flag table coverage.
+//
+// The model flags used to be registered via `MODEL_FLAG_HELP.slice(0, 13)` — a
+// magic index that would silently drop any flag appended to the table. The
+// table is now the single source for both help text and option plumbing, and
+// this test pins that every tunable is reachable from the command line.
+// ---------------------------------------------------------------------------
+
+test("every model parameter is exposed as a CLI flag and reaches the estimate", () => {
+  const flagKeys = new Set(MODEL_FLAGS.map((f) => f.key))
+  for (const key of Object.keys(ESTIMATE_DEFAULTS)) {
+    ok(flagKeys.has(key as keyof typeof ESTIMATE_DEFAULTS), `${key} has a --flag`)
+  }
+  strictEqual(flagKeys.size, MODEL_FLAGS.length, "no duplicate keys in the flag table")
+
+  // The help output must list them all, with no truncation.
+  const help = runCli(["review", "--help"], "").stdout
+  for (const { flag } of MODEL_FLAGS) {
+    ok(help.includes(flag.split(" ")[0]), `${flag} appears in --help`)
+  }
+})
+
+test("a bad value for any model flag names the flag in the error", () => {
+  for (const { flag } of MODEL_FLAGS) {
+    const name = flag.split(" ")[0]
+    const { stderr } = runCli(["status", name, "not-a-number"], "{}")
+    ok(stderr.includes(name), `error names ${name}: "${stderr.trim()}"`)
+  }
+})
+
+test("an explicit --transcript that does not exist fails loudly", () => {
+  const { status, stderr } = runCli(["review", "--transcript", "/definitely/not/here.jsonl"], "")
+  strictEqual(status, 1, "missing transcript is an error, not a $0 report")
+  ok(stderr.includes("transcript not found"), `stderr explains: "${stderr.trim()}"`)
 })

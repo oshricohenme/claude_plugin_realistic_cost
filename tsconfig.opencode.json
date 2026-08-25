@@ -1,0 +1,21 @@
+{
+  "//": "The opencode TUI plugin is JSX + Bun-resolved, so it cannot share the main tsconfig. This config exists so the plugin is typechecked at all — previously it was excluded from every check, which is how it silently drifted away from the core engine.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "jsx": "preserve",
+    "strict": true,
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "paths": {
+      "realistic-cost/core": ["./src/core/index.ts"]
+    }
+  },
+  "include": ["opencode/plugins/**/*.tsx"]
+}

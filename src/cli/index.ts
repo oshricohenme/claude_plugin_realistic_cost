@@ -1,5 +1,5 @@
-import { Command, InvalidArgumentError } from "commander"
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import { Command, InvalidArgumentError, Option } from "commander"
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -17,7 +17,9 @@ import {
   type TranscriptStats,
 } from "../core/index.js"
 import { renderTerminal } from "./render.js"
-import { exportReport, type ExportResult } from "./export.js"
+import { exportReport, type ExportFormat, type ExportResult } from "./export.js"
+
+const EXPORT_FORMATS = ["html", "md", "pdf", "png"] as const
 import { readRatesFile } from "./rates.js"
 
 // ---------------------------------------------------------------------------
@@ -36,6 +38,11 @@ export function getVersion(): string {
 // Option parsing helpers
 // ---------------------------------------------------------------------------
 
+/** "--review-overhead <x>" -> "--review-overhead" (for error messages). */
+function flagName(flag: string): string {
+  return flag.split(/\s/, 1)[0] ?? flag
+}
+
 function num(label: string, { min = 0 }: { min?: number } = {}) {
   return (v: string): number => {
     const n = Number(v)
@@ -46,7 +53,8 @@ function num(label: string, { min = 0 }: { min?: number } = {}) {
   }
 }
 
-const int = (label: string, { min = 0 }: { min?: number } = {}) =>
+const int =
+  (label: string, { min = 0 }: { min?: number } = {}) =>
   (v: string): number => {
     const n = Number(v)
     if (!Number.isInteger(n) || n < min) {
@@ -133,9 +141,23 @@ interface CacheEntry {
   stats: TranscriptStats
 }
 
+/**
+ * Cache files live in a private per-user directory (0700) rather than directly
+ * in a shared temp dir: a predictable path in a world-writable directory lets
+ * another local user pre-create the name as a symlink and redirect our write.
+ */
+function cacheDir(): string {
+  const dir = join(
+    tmpdir(),
+    `realistic-cost-${typeof process.getuid === "function" ? process.getuid() : "user"}`,
+  )
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
+}
+
 function cachePathFor(transcript: string): string {
-  const key = createHash("sha1").update(transcript).digest("hex").slice(0, 20)
-  return join(tmpdir(), `realistic-cost-cache-${key}.json`)
+  const key = createHash("sha256").update(transcript).digest("hex").slice(0, 20)
+  return join(cacheDir(), `cache-${key}.json`)
 }
 
 function readCachedStats(transcript: string, mtimeMs: number, size: number): TranscriptStats | null {
@@ -153,7 +175,7 @@ function readCachedStats(transcript: string, mtimeMs: number, size: number): Tra
 function writeCachedStats(transcript: string, mtimeMs: number, size: number, stats: TranscriptStats): void {
   try {
     const entry: CacheEntry = { mtimeMs, size, stats }
-    writeFileSync(cachePathFor(transcript), JSON.stringify(entry))
+    writeFileSync(cachePathFor(transcript), JSON.stringify(entry), { mode: 0o600 })
   } catch {
     // cache write failures are non-fatal
   }
@@ -183,43 +205,31 @@ interface CliOpts {
   durationMs?: number
   aiCost?: number
   rates?: string
-  reviewOverhead?: number
-  qaOverhead?: number
-  qaWithTests?: number
-  designOverhead?: number
-  pmOverhead?: number
-  emOverhead?: number
-  devopsDeploy?: number
-  securitySensitive?: number
-  securityNormal?: number
-  techwriterOverhead?: number
-  discoverySearchHours?: number
-  discoveryReadHours?: number
-  discoveryThinkingHours?: number
   hoursPerDay?: number
+  /** Model-tuning flags, keyed by commander's camelCased option name. */
+  [modelFlag: string]: unknown
 }
 
-/** Build EstimateOptions from whichever model flags the user passed. */
+/**
+ * Build EstimateOptions from whichever model flags the user passed. Driven by
+ * MODEL_FLAGS, so a new knob needs one table entry and nothing else.
+ */
 function modelOptions(o: CliOpts): EstimateOptions {
-  const eo: EstimateOptions = {}
-  if (o.reviewOverhead != null) eo.reviewOverheadMultiplier = o.reviewOverhead
-  if (o.qaOverhead != null) eo.qaOverheadMultiplier = o.qaOverhead
-  if (o.qaWithTests != null) eo.qaWithTestsMultiplier = o.qaWithTests
-  if (o.designOverhead != null) eo.designOverheadMultiplier = o.designOverhead
-  if (o.pmOverhead != null) eo.pmOverheadMultiplier = o.pmOverhead
-  if (o.emOverhead != null) eo.emOverheadMultiplier = o.emOverhead
-  if (o.devopsDeploy != null) eo.devopsDeployMultiplier = o.devopsDeploy
-  if (o.securitySensitive != null) eo.securitySensitiveMultiplier = o.securitySensitive
-  if (o.securityNormal != null) eo.securityNormalMultiplier = o.securityNormal
-  if (o.techwriterOverhead != null) eo.techwriterOverheadMultiplier = o.techwriterOverhead
-  if (o.discoverySearchHours != null) eo.discoverySearchHours = o.discoverySearchHours
-  if (o.discoveryReadHours != null) eo.discoveryReadHours = o.discoveryReadHours
-  if (o.discoveryThinkingHours != null) eo.discoveryThinkingHours = o.discoveryThinkingHours
-  return eo
+  const eo: Record<string, number> = {}
+  for (const { flag, key } of MODEL_FLAGS) {
+    const v = o[optionKey(flag)]
+    if (typeof v === "number") eo[key] = v
+  }
+  return eo as EstimateOptions
 }
 
 function buildReport(input: StatusLineInput, opts: CliOpts, useCache: boolean): CostReport {
   let transcript = opts.transcript
+  // An explicit --transcript that does not exist is a user error, not a reason
+  // to silently price an empty session as $0.
+  if (transcript && !existsSync(transcript)) {
+    throw new Error(`transcript not found: ${transcript}`)
+  }
   if (!transcript && input.transcript_path) transcript = input.transcript_path
   if (!transcript) transcript = autoDiscoverTranscript(input.workspace?.current_dir)
 
@@ -240,31 +250,53 @@ function buildReport(input: StatusLineInput, opts: CliOpts, useCache: boolean): 
 
   const estimateOptions = modelOptions(opts)
   const estimate = estimateHours(stats, estimateOptions)
-  const rates = readRatesFile(opts.rates)
-  const report = computeCost({
+  const { rates, currency } = readRatesFile(opts.rates)
+  return computeCost({
     stats,
     estimate,
     rates,
     options: {
       estimateOptions,
+      currency,
       productiveHoursPerDay: opts.hoursPerDay,
       aiCost: opts.aiCost ?? input.cost?.total_cost_usd ?? 0,
     },
   })
-  return report
 }
 
 // ---------------------------------------------------------------------------
 // Stdin reader
 // ---------------------------------------------------------------------------
 
+/**
+ * Read the status-line JSON from stdin.
+ *
+ * `isTTY` is not a sufficient guard: when the CLI is launched from an agent
+ * harness, a hook, or CI, stdin is a pipe that is open but that nobody ever
+ * writes to or closes — waiting for "end" there hangs forever. So we also give
+ * up if no byte has arrived within `STDIN_FIRST_BYTE_TIMEOUT_MS`. Once data
+ * starts flowing we wait for the real end of stream.
+ */
+const STDIN_FIRST_BYTE_TIMEOUT_MS = 150
+
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return ""
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      process.stdin.pause()
+      resolve(Buffer.concat(chunks).toString("utf8"))
+    }
+    const timer = setTimeout(() => {
+      if (chunks.length === 0) done()
+    }, STDIN_FIRST_BYTE_TIMEOUT_MS)
     process.stdin.on("data", (c: Buffer) => chunks.push(c))
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
-    process.stdin.on("error", () => resolve(""))
+    process.stdin.on("end", done)
+    process.stdin.on("error", done)
   })
 }
 
@@ -272,42 +304,122 @@ async function readStdin(): Promise<string> {
 // CLI
 // ---------------------------------------------------------------------------
 
-const MODEL_FLAG_HELP = [
-  ["--review-overhead <x>", "peer-review overhead multiplier (default 0.35)"],
-  ["--qa-overhead <x>", "QA overhead when no tests were written (default 0.50)"],
-  ["--qa-with-tests <x>", "QA overhead when tests were written (default 0.35)"],
-  ["--design-overhead <x>", "design overhead of FE+FS impl (default 0.60)"],
-  ["--pm-overhead <x>", "PM overhead of impl hours (default 0.15)"],
-  ["--em-overhead <x>", "EM overhead of impl hours (default 0.10)"],
-  ["--devops-deploy <x>", "deploy/CI overhead of eng impl (default 0.15)"],
-  ["--security-sensitive <x>", "security overhead when auth/data/infra touched (default 0.15)"],
-  ["--security-normal <x>", "security overhead otherwise (default 0.05)"],
-  ["--techwriter-overhead <x>", "changelog/docs overhead of impl (default 0.10)"],
-  ["--discovery-search-hours <x>", "hours per glob+grep call (default 0.25)"],
-  ["--discovery-read-hours <x>", "hours per file read (default 0.15)"],
-  ["--discovery-thinking-hours <x>", "hours per thinking turn (default 0.10)"],
-  ["--hours-per-day <n>", "productive hours per man-day (default 8)"],
-] as const
+/**
+ * Every EstimateOptions knob, as a CLI flag. Each entry maps a flag to the
+ * `EstimateOptions` key it sets, so adding a knob here wires it end-to-end —
+ * there is no second list to keep in step and no index to keep in step with.
+ * `--hours-per-day` is deliberately absent: it is a CostOption, not an
+ * EstimateOption, and is registered separately.
+ */
+export const MODEL_FLAGS: ReadonlyArray<{
+  flag: string
+  key: keyof EstimateOptions
+  desc: string
+}> = [
+  {
+    flag: "--review-overhead <x>",
+    key: "reviewOverheadMultiplier",
+    desc: "peer-review overhead multiplier (default 0.35)",
+  },
+  {
+    flag: "--qa-overhead <x>",
+    key: "qaOverheadMultiplier",
+    desc: "QA overhead when no tests were written (default 0.50)",
+  },
+  {
+    flag: "--qa-with-tests <x>",
+    key: "qaWithTestsMultiplier",
+    desc: "QA overhead when tests were written (default 0.35)",
+  },
+  {
+    flag: "--design-overhead <x>",
+    key: "designOverheadMultiplier",
+    desc: "design overhead of FE+FS impl (default 0.60)",
+  },
+  {
+    flag: "--pm-overhead <x>",
+    key: "pmOverheadMultiplier",
+    desc: "PM overhead of impl hours (default 0.15)",
+  },
+  {
+    flag: "--em-overhead <x>",
+    key: "emOverheadMultiplier",
+    desc: "EM overhead of impl hours (default 0.10)",
+  },
+  {
+    flag: "--devops-deploy <x>",
+    key: "devopsDeployMultiplier",
+    desc: "deploy/CI overhead of eng impl (default 0.15)",
+  },
+  {
+    flag: "--security-sensitive <x>",
+    key: "securitySensitiveMultiplier",
+    desc: "security overhead when auth/data/infra touched (default 0.15)",
+  },
+  {
+    flag: "--security-normal <x>",
+    key: "securityNormalMultiplier",
+    desc: "security overhead otherwise (default 0.05)",
+  },
+  {
+    flag: "--techwriter-overhead <x>",
+    key: "techwriterOverheadMultiplier",
+    desc: "changelog/docs overhead of impl (default 0.10)",
+  },
+  {
+    flag: "--thinking-cost-per-token <x>",
+    key: "thinkingCostPerToken",
+    desc: "USD per reasoning token billed as design time (default 0.05)",
+  },
+  {
+    flag: "--discovery-search-hours <x>",
+    key: "discoverySearchHours",
+    desc: "hours per glob+grep call (default 0.25)",
+  },
+  {
+    flag: "--discovery-read-hours <x>",
+    key: "discoveryReadHours",
+    desc: "hours per file read (default 0.15)",
+  },
+  {
+    flag: "--discovery-thinking-hours <x>",
+    key: "discoveryThinkingHours",
+    desc: "hours per thinking turn (default 0.10)",
+  },
+]
+
+/** commander camelCases "--qa-with-tests" to "qaWithTests". */
+function optionKey(flag: string): string {
+  return flagName(flag)
+    .replace(/^--/, "")
+    .replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())
+}
 
 export function createProgram(): Command {
   const program = new Command()
 
   program
     .name("realistic-cost")
-    .description("Estimate what a 100% human-driven engineering team would cost to produce the work in this Claude Code session.")
+    .description(
+      "Estimate what a 100% human-driven engineering team would cost to produce the work in this Claude Code session.",
+    )
     .version(getVersion())
 
   const commonOpts = (cmd: Command) => {
     cmd
       .option("--transcript <path>", "transcript JSONL path (overrides stdin)")
-      .option("--lines-added <n>", "override lines added", num("lines-added"))
-      .option("--lines-removed <n>", "override lines removed", num("lines-removed"))
-      .option("--duration-ms <n>", "override session duration in ms", int("duration-ms"))
-      .option("--ai-cost <n>", "AI session cost in USD", num("ai-cost"))
+      .option("--lines-added <n>", "override lines added", num("--lines-added"))
+      .option("--lines-removed <n>", "override lines removed", num("--lines-removed"))
+      .option("--duration-ms <n>", "override session duration in ms", int("--duration-ms"))
+      .option("--ai-cost <n>", "AI session cost in USD", num("--ai-cost"))
       .option("--rates <path>", "path to rates JSON override")
-      .option("--hours-per-day <n>", "productive hours per man-day (default 8)", num("hours-per-day", { min: 1 }))
-    for (const [flag, desc] of MODEL_FLAG_HELP.slice(0, 13)) {
-      cmd.option(flag, desc, num(flag.replace(/[ <-].*$/, "")))
+      .option(
+        "--hours-per-day <n>",
+        "productive hours per man-day (default 8)",
+        num("--hours-per-day", { min: 1 }),
+      )
+    for (const { flag, desc } of MODEL_FLAGS) {
+      cmd.option(flag, desc, num(flagName(flag)))
     }
     return cmd
   }
@@ -336,34 +448,25 @@ export function createProgram(): Command {
     })
 
   commonOpts(
-    program
-      .command("review")
-      .description("Print the full human-team cost review to the terminal."),
-  )
-    .action(async (local: CliOpts) => {
-      const stdin = await readStdin()
-      const input = stdin ? parseStatusLineStdin(stdin) : {}
-      const report = buildReport(input, local, false)
-      process.stdout.write(renderTerminal(report) + "\n")
-    })
+    program.command("review").description("Print the full human-team cost review to the terminal."),
+  ).action(async (local: CliOpts) => {
+    const stdin = await readStdin()
+    const input = stdin ? parseStatusLineStdin(stdin) : {}
+    const report = buildReport(input, local, false)
+    process.stdout.write(renderTerminal(report) + "\n")
+  })
 
-  commonOpts(
-    program
-      .command("export")
-      .description("Export the cost review to HTML, PDF, or PNG."),
-  )
-    .option("-f, --format <fmt>", "output format: html | pdf | png", "html")
+  commonOpts(program.command("export").description("Export the cost review to HTML, PDF, or PNG."))
+    .addOption(new Option("-f, --format <fmt>", "output format").choices(EXPORT_FORMATS).default("html"))
     .option("-o, --out <path>", "output file path")
-    .action(async (local: { format?: string; out?: string } & CliOpts) => {
+    .action(async (local: { format?: ExportFormat; out?: string } & CliOpts) => {
       const stdin = await readStdin()
       const input = stdin ? parseStatusLineStdin(stdin) : {}
       const report = buildReport(input, local, false)
-      const fmt = (local.format ?? "html") as "html" | "pdf" | "png"
-      const result: ExportResult = exportReport(report, { format: fmt, out: local.out })
+      const result: ExportResult = exportReport(report, { format: local.format ?? "html", out: local.out })
+      // A graceful degrade (no Chrome -> HTML) is a successful run, so the
+      // exit code stays 0; the note explains what happened.
       process.stdout.write(`${result.note}\n  → ${result.outPath}\n`)
-      if (!result.converted) {
-        process.exitCode = 0 // graceful degrade is not an error
-      }
     })
 
   return program

@@ -18,9 +18,23 @@ if [ ! -t 0 ]; then
 fi
 
 # ── Per-session key: session_id, else transcript_path, else "default" ──
-SESSION_KEY="$(printf '%s' "$INPUT" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+# Parsed with node when available (the payload is JSON and sed is not a JSON
+# parser); sed is the fallback so the hook still works without node.
+SESSION_KEY=""
+if command -v node >/dev/null 2>&1; then
+  SESSION_KEY="$(printf '%s' "$INPUT" | node -e '
+    let s = ""
+    process.stdin.on("data", (c) => (s += c))
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(s)
+        process.stdout.write(String(j.session_id ?? j.transcript_path ?? ""))
+      } catch { /* not JSON — fall back below */ }
+    })
+  ' 2>/dev/null || true)"
+fi
 if [ -z "$SESSION_KEY" ]; then
-  SESSION_KEY="$(printf '%s' "$INPUT" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  SESSION_KEY="$(printf '%s' "$INPUT" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
 fi
 if [ -z "$SESSION_KEY" ]; then
   SESSION_KEY="default"
@@ -28,7 +42,14 @@ fi
 # Sanitize for use in a filename (shell-safe, no slashes/spaces).
 SAFE_KEY="$(printf '%s' "$SESSION_KEY" | tr -cd 'a-zA-Z0-9._-' | cut -c 1-64)"
 [ -n "$SAFE_KEY" ] || SAFE_KEY="default"
-COUNTER_FILE="/tmp/realistic-cost-stop-${SAFE_KEY}"
+
+# Counters live in a private per-user directory, not directly in a shared
+# world-writable /tmp: a predictable path there lets another local user
+# pre-create the name as a symlink and redirect our write.
+STATE_DIR="${XDG_STATE_HOME:-${TMPDIR:-/tmp}}/realistic-cost-$(id -u)"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+COUNTER_FILE="$STATE_DIR/stop-${SAFE_KEY}"
 
 # ── Counter: only print every 5th turn (validate before arithmetic) ──
 COUNT=0
@@ -47,7 +68,7 @@ fi
 # Reset counter
 echo 0 > "$COUNTER_FILE"
 
-# Resolve the realistic-cost binary (global install, local, or npx).
+# Resolve the realistic-cost binary from the usual global install locations.
 RC_BIN=""
 if command -v realistic-cost >/dev/null 2>&1; then
   RC_BIN="realistic-cost"
@@ -55,15 +76,18 @@ elif [ -x "$HOME/.npm-global/bin/realistic-cost" ]; then
   RC_BIN="$HOME/.npm-global/bin/realistic-cost"
 elif [ -x "$HOME/.claude/realistic-cost" ]; then
   RC_BIN="$HOME/.claude/realistic-cost"
+elif [ -x "$HOME/.local/bin/realistic-cost" ]; then
+  RC_BIN="$HOME/.local/bin/realistic-cost"
 fi
 
 # Forward the captured hook payload to the CLI; it reads the JSON, extracts
 # transcript_path, parses the transcript, and prints the status line.
-if [ -n "$RC_BIN" ]; then
-  OUTPUT="$(printf '%s' "$INPUT" | "$RC_BIN" status 2>/dev/null)" || true
-else
-  OUTPUT="$(printf '%s' "$INPUT" | npx --yes realistic-cost status 2>/dev/null)" || true
+# No npx fallback on purpose: a hook that runs every few turns must not
+# resolve a package from the registry. If the CLI is not installed, stay quiet.
+if [ -z "$RC_BIN" ]; then
+  exit 0
 fi
+OUTPUT="$(printf '%s' "$INPUT" | "$RC_BIN" status 2>/dev/null)" || true
 
 if [ -n "$OUTPUT" ]; then
   printf '%s\n' "$OUTPUT"
