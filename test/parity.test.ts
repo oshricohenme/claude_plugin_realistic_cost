@@ -1,155 +1,105 @@
 import { test } from "node:test"
-import { writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import { ok } from "node:assert"
-import { emptyStats, estimateHours, computeCost } from "../src/core/index.js"
-import type { TranscriptStats, FileWriteOp } from "../src/core/index.js"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
+import { ok, strictEqual } from "node:assert"
+import * as core from "../src/core/index.js"
 
 // ---------------------------------------------------------------------------
-// The opencode TUI plugin ships a self-contained copy of the cost engine — it
-// is loaded standalone by opencode and cannot import from src/. That copy has
-// silently drifted before (PM/EM derived from the grand total instead of role
-// hours, a missing new-file multiplier, complexity applied per domain instead
-// of per write), so the same session was priced differently in each harness.
+// Engine parity for the opencode TUI plugin.
 //
-// This test executes BOTH engines on the same fixtures and asserts they agree.
-// It extracts the plugin's engine section — everything between the "INLINED
-// ENGINE" and "SESSION BRIDGE" banners, which is plain TypeScript with no JSX
-// — and imports it. The suite already runs under tsx, so a .ts file imports
-// directly.
+// The plugin used to ship a self-contained copy of the cost engine, and that
+// copy silently drifted — PM/EM derived from the grand total instead of role
+// hours, a missing new-file multiplier, complexity applied per domain instead
+// of per write — so the same session was priced differently in each harness.
+// The copy has been deleted: the plugin now imports the one engine in
+// `src/core/`.
+//
+// That makes drift structurally impossible, but only for as long as nobody
+// reintroduces a local copy — so this suite guards the shape of the plugin
+// rather than comparing two implementations. It is a source-level check on
+// purpose: the plugin resolves JSX and its host API through bun, so it cannot
+// be imported by `node --test`, and `npm run typecheck` deliberately excludes
+// it (see tsconfig.opencode.json). Without this, a reintroduced copy would
+// only be caught by the separate `opencode-plugin` CI job.
 // ---------------------------------------------------------------------------
 
 const TUI_PATH = resolve(import.meta.dirname, "../opencode/plugins/realistic-cost-tui.tsx")
+const CORE_SPECIFIER = "pre_ai_dev_cost_receipt/core"
 
-function loadTuiEngine(): Promise<Record<string, any>> {
-  const src = readFileSync(TUI_PATH, "utf8")
+const tuiSource = readFileSync(TUI_PATH, "utf8")
 
-  const startMarker = src.indexOf("// INLINED ENGINE")
-  const endMarker = src.indexOf("// SESSION BRIDGE")
-  ok(startMarker > 0, "TUI plugin must still contain the INLINED ENGINE banner")
-  ok(endMarker > startMarker, "TUI plugin must still contain the SESSION BRIDGE banner")
-
-  // Back up to the start of each banner's rule line.
-  const start = src.lastIndexOf("// ═", startMarker)
-  const end = src.lastIndexOf("// ═", endMarker)
-  const engine = src.slice(start, end)
-
-  ok(/function estimateHours/.test(engine), "engine slice must include estimateHours")
-  ok(/function computeCost/.test(engine), "engine slice must include computeCost")
-
-  const dir = mkdtempSync(join(tmpdir(), "rc-parity-"))
-  const file = join(dir, "tui-engine.ts")
-  writeFileSync(file, engine + "\nexport { estimateHours, computeCost }\n", "utf8")
-  return import(file).finally(() => rmSync(dir, { recursive: true, force: true }))
+/** The identifiers the plugin pulls in from the shared engine. */
+function importedCoreSymbols(src: string): string[] {
+  const m = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${CORE_SPECIFIER}["']`).exec(src)
+  ok(m, `TUI plugin must import from "${CORE_SPECIFIER}"`)
+  return m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => s.replace(/^type\s+/, ""))
+    .map((s) => s.split(/\s+as\s+/)[0].trim())
 }
 
-function statsWith(writes: Array<Partial<FileWriteOp>>, over: Partial<TranscriptStats> = {}): TranscriptStats {
-  const s = emptyStats()
-  s.fileWrites = writes.map((w) => ({
-    path: w.path ?? "src/a.ts",
-    tool: w.tool ?? "Edit",
-    linesAdded: w.linesAdded ?? 0,
-    linesRemoved: w.linesRemoved ?? 0,
-    domain: w.domain ?? "backend",
-  })) as FileWriteOp[]
-  s.linesAdded = s.fileWrites.reduce((n, w) => n + w.linesAdded, 0)
-  s.linesRemoved = s.fileWrites.reduce((n, w) => n + w.linesRemoved, 0)
-  return Object.assign(s, over)
-}
+test("the opencode TUI plugin has no engine of its own", () => {
+  ok(tuiSource.includes(CORE_SPECIFIER), `TUI plugin must source its numbers from "${CORE_SPECIFIER}"`)
+  ok(
+    !/INLINED ENGINE/.test(tuiSource),
+    "TUI plugin reintroduced an inlined engine — import from src/core instead",
+  )
 
-// Fixtures chosen to exercise each place the two engines previously diverged.
-const FIXTURES: Array<{ name: string; stats: TranscriptStats }> = [
-  {
-    name: "empty session (management floor only)",
-    stats: emptyStats(),
-  },
-  {
-    name: "edits only, no new files",
-    stats: statsWith([
-      { tool: "Edit", linesAdded: 40, linesRemoved: 10, domain: "backend" },
-      { tool: "Edit", linesAdded: 25, linesRemoved: 5, domain: "frontend" },
-    ]),
-  },
-  {
-    name: "new files (exercises the 1.5x new-file multiplier)",
-    stats: statsWith([
-      { tool: "Write", linesAdded: 120, linesRemoved: 0, domain: "backend" },
-      { tool: "Write", linesAdded: 60, linesRemoved: 0, domain: "frontend" },
-    ]),
-  },
-  {
-    name: "one large write among small edits (per-write vs per-domain weighting)",
-    stats: statsWith([
-      { tool: "Write", linesAdded: 400, linesRemoved: 0, domain: "backend" },
-      { tool: "Edit", linesAdded: 5, linesRemoved: 2, domain: "backend" },
-      { tool: "Edit", linesAdded: 3, linesRemoved: 1, domain: "backend" },
-    ]),
-  },
-  {
-    name: "tests written (exercises the QA multiplier branch)",
-    stats: statsWith([
-      { tool: "Write", linesAdded: 90, linesRemoved: 0, domain: "test" },
-      { tool: "Edit", linesAdded: 30, linesRemoved: 8, domain: "backend" },
-    ]),
-  },
-  {
-    name: "no tests written (opposite QA branch)",
-    stats: statsWith([{ tool: "Edit", linesAdded: 30, linesRemoved: 8, domain: "backend" }]),
-  },
-  {
-    name: "read-heavy session with thinking",
-    stats: statsWith([{ tool: "Edit", linesAdded: 12, linesRemoved: 4, domain: "backend" }], {
-      toolCalls: { ...emptyStats().toolCalls, read: 20, grep: 6, glob: 3, edit: 1 },
-      thinkingTurns: 9,
-      thinkingTokens: 4000,
-    } as Partial<TranscriptStats>),
-  },
-]
-
-test("opencode TUI engine prices sessions identically to src/core", async () => {
-  const tui = await loadTuiEngine()
-
-  for (const f of FIXTURES) {
-    const coreReport = computeCost({ stats: f.stats, estimate: estimateHours(f.stats) })
-    const tuiReport = tui.computeCost(f.stats, tui.estimateHours(f.stats), 0)
-
-    const dCost = Math.abs(coreReport.totalCost - tuiReport.totalCost)
-    const dHours = Math.abs(coreReport.totalHours - tuiReport.totalHours)
-
+  // Locally redefining any of these is how the two engines diverged before.
+  // The plugin may *call* them; it must not declare them.
+  for (const name of ["estimateHours", "computeCost", "classifyDomain", "applyPathFlags"]) {
     ok(
-      dCost < 0.01,
-      `[${f.name}] total cost drifted: core $${coreReport.totalCost.toFixed(2)} vs TUI $${tuiReport.totalCost.toFixed(2)}`,
+      !new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\b`).test(tuiSource),
+      `TUI plugin declares its own ${name}() — it must import it from the shared engine`,
     )
-    ok(
-      dHours < 0.01,
-      `[${f.name}] total hours drifted: core ${coreReport.totalHours.toFixed(2)}h vs TUI ${tuiReport.totalHours.toFixed(2)}h`,
-    )
+  }
+
+  // A hardcoded rate table is the other half of the old duplicated engine.
+  ok(
+    !/\bconst\s+RATES\b/.test(tuiSource),
+    "TUI plugin declares its own RATES table — rates live in src/core/rates.ts",
+  )
+})
+
+test("every symbol the TUI plugin imports is exported by src/core", () => {
+  const imported = importedCoreSymbols(tuiSource)
+  ok(imported.length > 0, "TUI plugin imports nothing from the shared engine")
+
+  // Types are erased at runtime, so only value exports are checkable here.
+  // The `opencode-plugin` CI job typechecks the rest.
+  const values = imported.filter((n) => !/^[A-Z]/.test(n))
+  const exported = new Set(Object.keys(core))
+
+  for (const name of values) {
+    ok(exported.has(name), `TUI plugin imports "${name}", which src/core/index.ts does not export`)
   }
 })
 
-test("opencode TUI engine matches src/core per activity line item", async () => {
-  const tui = await loadTuiEngine()
+test("the TUI derives the coordination percentage instead of hardcoding it", () => {
+  const stats = core.emptyStats()
+  const report = core.computeCost({ stats, estimate: core.estimateHours(stats) })
+  const coordination = report.activities
+    .filter((a) => a.section === "coordination")
+    .reduce((n, a) => n + a.cost, 0)
 
-  for (const f of FIXTURES) {
-    const core = computeCost({ stats: f.stats, estimate: estimateHours(f.stats) })
-    const plugin = tui.computeCost(f.stats, tui.estimateHours(f.stats), 0)
+  const share = coordination / report.totalCost
+  strictEqual(
+    Math.abs(share - 0.2) < 0.005,
+    true,
+    `coordination tax is ${(share * 100).toFixed(1)}% of the grand total, not 20%`,
+  )
 
-    const coreByName = new Map(core.activities.map((a: any) => [a.activity, a]))
-    const tuiByName = new Map(plugin.activities.map((a: any) => [a.activity, a]))
-
-    ok(
-      coreByName.size === tuiByName.size,
-      `[${f.name}] different line items: core [${[...coreByName.keys()].join(", ")}] vs TUI [${[...tuiByName.keys()].join(", ")}]`,
-    )
-
-    for (const [name, a] of coreByName) {
-      const b = tuiByName.get(name)
-      ok(b, `[${f.name}] TUI is missing line item "${name}"`)
-      ok(
-        Math.abs(a.cost - b.cost) < 0.01,
-        `[${f.name}] "${name}" cost drifted: core $${a.cost.toFixed(2)} vs TUI $${b.cost.toFixed(2)}`,
-      )
-    }
-  }
+  // The plugin prints that share back to the user. It must compute it from the
+  // report it was handed — a literal here goes stale the moment the model is
+  // tuned, and the two harnesses start quoting different percentages.
+  ok(
+    /coordination/i.test(tuiSource),
+    "TUI plugin no longer renders the coordination section — update this test",
+  )
+  ok(
+    !/\b20\s*%/.test(tuiSource),
+    "TUI plugin hardcodes the 20% coordination share — derive it from the report",
+  )
 })

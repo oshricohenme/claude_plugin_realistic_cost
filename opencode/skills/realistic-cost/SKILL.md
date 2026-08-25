@@ -1,73 +1,70 @@
 ---
 name: realistic-cost
-description: "Show what a 100% human-driven engineering team would cost for this session. Use /realistic-cost to see the full receipt (line items, coordination tax, grand total), or /realistic-cost export pdf|png|html to export the report."
+description: Show what a 100% human-driven engineering team would have cost for this session — the full receipt with line items, coordination tax, grand total and per-role breakdown, or an export to pdf/png/html/md.
 ---
 
 # /realistic-cost — Pre-AI Human Engineering Cost
 
-You are invoking the `realistic-cost` tool, which estimates what a fully
-human-driven engineering team (PM, EM, designer, backend, frontend, fullstack,
-QA, DevOps, security, data, tech writer) would cost to produce the work in the
-current session.
+Estimates what a fully human-driven engineering team (PM, EM, designer,
+backend, frontend, full-stack, QA, DevOps, security, data engineer, tech
+writer) would have cost to produce the work in the current session.
 
-The tool reads session metadata (tool-call counts, lines added/removed,
-duration, thinking turns) — **no source-code diffing**.
+It reads session metadata — files changed, lines added and removed, tool-call
+counts, reasoning volume, duration. No source-code diffing.
 
-The output is formatted as a **receipt** with three sections, each with its own
-subtotal:
+## Two ways to see the numbers in opencode
 
-1. **Management Overhead** — Product Management, Engineering Management.
-2. **Value Creation** — Thinking, Code Comprehension, Coding, Design, Peer
-   Review, QA & Testing, DevOps & Infra, Security Review.
-3. **Coordination Tax** — meetings with the EM, PM and DevOps, plus issue
-   management. Its subtotal also shows what percentage of the grand total is
-   coordination overhead.
+**The TUI plugin is the accurate one.** It reads live opencode session state,
+so it always reflects the session you are actually in:
 
-A bold Grand Total closes the receipt, followed by the effort in man-days.
+- the sidebar footer shows a running total
+- the `/realistic-cost` command (registered by the plugin) opens the full
+  receipt dialog
 
-Value Creation and Coordination Tax line items are omitted when they come out
-at zero, but Management Overhead is always billed — it stands for the planning
-that precedes the session — so a session that produced no code still shows a
-non-zero total.
+**The CLI** (`realistic-cost review`) reads Claude Code transcripts from
+`~/.claude/projects/`. In an opencode session there is usually no such
+transcript, and it will report a near-zero result. Use the CLI here only when
+the user explicitly wants to price a Claude Code session or passes an explicit
+`--transcript <path>`.
 
 ## Steps
 
-1. Parse the user's arguments after `/realistic-cost`:
-   - Empty or `review` → run a **review**.
-   - `export` followed by `pdf` | `png` | `html` (default `html`) → run an **export**.
+1. Read the arguments after `/realistic-cost`:
+   - empty or `review` → show the **review**
+   - `export` followed by `pdf` | `png` | `html` | `md` (default `html`) → run an **export**
 
-2. Run the matching command via the Bash tool. The binary is on PATH after
-   `setup.sh` has been run.
-
-### Review (default)
+2. For a review, prefer telling the user to open the plugin dialog
+   (`/realistic-cost` in the TUI) or read the sidebar footer. Only shell out to
+   the CLI when they want a specific transcript priced:
 
 ```bash
-realistic-cost review
+realistic-cost review --transcript <path-to-session.jsonl>
 ```
 
-If `realistic-cost` is not on PATH, fall back to `npx --yes realistic-cost review`.
+Print whatever receipt you get verbatim, inside a code block. The receipt has
+four parts: **Management Overhead**, **Value Creation**, **Coordination Tax**
+(20% of the grand total), and the **Grand Total** followed by effort in
+man-days and a per-role breakdown. Then summarise the headline numbers — total
+cost and man-days — in one or two sentences.
 
-- The tool auto-discovers the current session's transcript. In opencode it
-  looks under `~/.claude/projects/`; if none is found it reports a $0 / 0h
-  no-op rather than crashing.
-- If auto-discovery finds nothing, you may pass a transcript path explicitly:
-  `realistic-cost review --dir <project-dir>` or pipe status-line JSON via
-  stdin: `echo '<json>' | realistic-cost status`.
-
-Print the full colored receipt it outputs to the terminal, verbatim, inside a
-code block so the user sees the line items and totals. Then give a 1–2 sentence
-plain-language summary of the headline numbers (total cost, man-days effort).
+Do not present the figures as a quote or an invoice; they are a heuristic
+estimate for order-of-magnitude framing.
 
 ### Export
 
 ```bash
-realistic-cost export --format <pdf|png|html> [--out <path>]
+realistic-cost export --format <pdf|png|html|md> [--out <path>]
 ```
 
-- For `pdf`/`png`, the tool shells out to headless Chrome. If Chrome is not
-  installed it gracefully degrades to writing an HTML file and tells you the
-  path — relay that path and note to the user that installing Chrome enables
-  PDF/PNG.
-- After the export, tell the user the output file path.
+- `html` and `md` always work.
+- `pdf` and `png` shell out to headless Chrome. Without a browser the command
+  writes HTML instead and says so — relay that path and mention that
+  installing Chrome enables PDF/PNG.
 
-3. Do not write any code yourself — this command only runs `realistic-cost`.
+Report the output file path when it finishes.
+
+## Notes
+
+- This command only runs `realistic-cost`. Do not write code or edit files.
+- If `realistic-cost` is not on PATH, tell the user to run `./setup.sh` from
+  the repo rather than fetching it at runtime.

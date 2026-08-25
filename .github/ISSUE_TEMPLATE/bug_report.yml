@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken or the numbers look wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact any file paths or transcript content you don't want public.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `realistic-cost --version`
+    validations: { required: true }
+  - type: input
+    id: env
+    attributes:
+      label: OS and Node version
+      placeholder: "macOS 15.1, Node 22.9.0"
+    validations: { required: true }
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options: [setup.sh, claude-code/install.sh, npm install -g, manual, other]
+    validations: { required: true }
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Which harness?
+      options: [Claude Code, opencode, CLI only]
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the command you ran and its output.
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        If the numbers look wrong, a synthetic transcript that reproduces it is
+        the single most useful thing you can attach.

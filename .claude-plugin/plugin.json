@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "realistic-cost",
+  "displayName": "Realistic Cost — Pre-AI Dev Cost Receipt",
+  "version": "0.4.0",
+  "description": "Estimate what a 100% human-driven engineering team (PM, EM, design, backend, frontend, QA, DevOps, security, data, tech writing) would have cost to produce the work in an AI coding session — as a terminal receipt, status line, or exported report.",
+  "author": {
+    "name": "Oshri Cohen",
+    "url": "https://oshricohen.me"
+  },
+  "homepage": "https://github.com/oshricohenme/claude_plugin_realistic_cost#readme",
+  "repository": "https://github.com/oshricohenme/claude_plugin_realistic_cost",
+  "license": "MIT",
+  "keywords": ["cost", "estimation", "engineering-management", "reporting", "statusline", "ai-coding"],
+  "skills": "./claude-code/skills/",
+  "hooks": "./claude-code/hooks/hooks.json"
+}

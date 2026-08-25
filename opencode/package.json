@@ -12,6 +12,7 @@
   "dependencies": {
     "@opentui/core": "^0.4.5",
     "@opentui/solid": "^0.4.5",
+    "pre_ai_dev_cost_receipt": "file:..",
     "solid-js": "^1.9.12"
   },
   "peerDependencies": {

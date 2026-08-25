@@ -23,12 +23,16 @@
  *     tool-call counts (Read, Write, Edit, Glob, Grep, Bash, Task)
  *     per-write file paths + line counts (for role split by file extension)
  *     thinking turns/tokens (assistant reasoning volume)
+ *   NOTE: tool inputs are read in BOTH snake_case (file_path, old_string —
+ *   what Claude Code writes) and camelCase. Reading one spelling only scores
+ *   the other's writes as zero lines.
  *
  * ----------------------------------------------------------------------------
  * 1. DOMAIN CLASSIFICATION (by file path of Write/Edit targets):
- *    backend   (.ts/.js/.py/.go/.rs/.java/... minus FE/test/docs)
+ *    backend   (.ts/.js/.py/.go/.rs/.java/... minus FE/data/test/docs)
  *    frontend  (.tsx/.jsx/.vue/.svelte/.css/.html/...)
  *    fullstack (app/ route files)
+ *    data      (.sql, migrations/, schema.prisma, dbt/, etl/)
  *    docs      (.md/.mdx/.rst)
  *    config    (dockerfile/.tf/.github/yaml/toml/package.json/tsconfig)
  *    test      (files named .test. or .spec. or under a __tests__ dir)
@@ -36,9 +40,10 @@
  *    other     (fallback)
  *
  * 2. IMPLEMENTATION HOURS (productive lines/hr by domain):
- *    backend 12, frontend 15, fullstack 13, docs 30, config 8, test 20, other 10
+ *    backend 12, frontend 15, fullstack 13, data 10, docs 30, config 8,
+ *    test 20, other 10
  *    Deletions (linesRemoved) billed at 0.3x (faster to remove).
- *    Per-write complexity multipliers (product capped at 6x):
+ *    Per-write complexity multipliers:
  *      new file (Write tool, full content)        x1.5
  *      large change (single write > 100 lines)    x1.3
  *    implHours(domain) = weightedLinesAdded / base + (removed / base) * 0.3
@@ -54,6 +59,7 @@
  *    backend   -> backend role
  *    frontend  -> frontend role
  *    fullstack -> fullstack (split 50/50 be/fe if both present)
+ *    data      -> data role
  *    docs      -> techwriter role
  *    config    -> devops role
  *    test      -> qa role (QA writing tests themselves)
@@ -71,7 +77,10 @@
  *    TechWriter:  +0.10 x implHours  (changelogs/API docs beyond docs written)
  *
  * 6. COST — the receipt (single source of the grand total):
- *    Value creation cost X = thinking (reasoning tokens x $0.05) +
+ *    All model parameters resolve through ESTIMATE_DEFAULTS in estimate.ts;
+ *    cost.ts does not restate them.
+ *    Value creation cost X = thinking (reasoning tokens x thinkingCostPerToken,
+ *      default $0.05) +
  *      comprehension + coding + design + peer review + QA + deploy +
  *      security review — all derived from the role estimate above.
  *    Management = the estimate's PM and EM role costs, verbatim.
@@ -81,6 +90,9 @@
  *    are role.totalHours x rate with percentage relative to the grand total
  *    (they do not include the cross-role coordination tax, so they sum to
  *    ~80%, not 100%).
+ *    Every activity line item is derived as hours x a strictly positive rate,
+ *    and items below MIN_DISPLAY_HOURS are dropped — a row can never print a
+ *    quantity of "0.0h" beside a non-zero amount.
  *
  * 7. CALENDAR (team effort, not elapsed wall-clock):
  *    manDays = totalHours / productiveHoursPerDay (default 8)
@@ -105,14 +117,7 @@ export type RoleId =
   | "data"
   | "techwriter"
 
-export type RoleCategory =
-  | "management"
-  | "design"
-  | "engineering"
-  | "quality"
-  | "ops"
-  | "security"
-  | "data"
+export type RoleCategory = "management" | "design" | "engineering" | "quality" | "ops" | "security" | "data"
 
 export interface Role {
   id: RoleId
@@ -149,14 +154,7 @@ export interface StatusLineInput {
 // ---------------------------------------------------------------------------
 
 export type FileDomain =
-  | "backend"
-  | "frontend"
-  | "fullstack"
-  | "docs"
-  | "config"
-  | "test"
-  | "design"
-  | "other"
+  "backend" | "frontend" | "fullstack" | "data" | "docs" | "config" | "test" | "design" | "other"
 
 export interface FileWriteOp {
   path: string
@@ -208,6 +206,8 @@ export interface EstimateOptions {
   securitySensitiveMultiplier?: number
   securityNormalMultiplier?: number
   techwriterOverheadMultiplier?: number
+  /** USD per reasoning token billed as senior design time (default 0.05). */
+  thinkingCostPerToken?: number
   discoverySearchHours?: number
   discoveryReadHours?: number
   discoveryThinkingHours?: number
@@ -248,6 +248,8 @@ export interface EstimateResult {
 
 export interface CostOptions {
   rates?: Partial<Record<RoleId, number>>
+  /** ISO 4217 code used to format amounts (default "USD"). */
+  currency?: string
   productiveHoursPerDay?: number
   /** Actual AI session cost in USD, shown alongside the human estimate. */
   aiCost?: number
@@ -293,6 +295,8 @@ export interface CostReport {
   calendar: CalendarEstimate
   generatedAt: string
   rates: Record<RoleId, number>
+  /** ISO 4217 code the amounts in this report are denominated in. */
+  currency: string
   aiCost: number
   aiDurationMs: number
   aiLinesAdded: number
@@ -308,4 +312,3 @@ export interface CostReport {
 //   report.ts:     formatStatusLine, formatMarkdown,
 //                  formatHtml  (each (report: CostReport) => string)
 // ---------------------------------------------------------------------------
-

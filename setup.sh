@@ -9,6 +9,40 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_DIR:-$HOME/.config/opencode}"
 
+ASSUME_YES=0
+TARGET=""
+WITH_PERMISSIONS=""
+
+usage() {
+  cat <<'USAGE'
+usage: ./setup.sh [options]
+
+  --target <claude-code|opencode|both>  what to install (skips the menu)
+  --yes                                 don't prompt; requires --target
+  --with-permissions                    allow-list realistic-cost commands in
+                                        ~/.claude/settings.json (opt-in)
+  -h, --help                            show this help
+
+With no options the script is interactive and confirms every step.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="${2:-}"; shift 2 ;;
+    --target=*) TARGET="${1#*=}"; shift ;;
+    --yes|-y) ASSUME_YES=1; shift ;;
+    --with-permissions) WITH_PERMISSIONS="--with-permissions"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ "$ASSUME_YES" = "1" ] && [ -z "$TARGET" ]; then
+  echo "--yes requires --target <claude-code|opencode|both>" >&2
+  exit 2
+fi
+
 # ───────────────────────── helpers ─────────────────────────
 
 c_dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
@@ -18,30 +52,28 @@ c_cyan()  { printf '\033[36m%s\033[0m\n' "$*"; }
 c_red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-# This script edits ~/.claude/settings.json and installs files into $HOME, so
-# it must never proceed on assumed answers. Piped into a shell (`curl | bash`)
-# there is no /dev/tty and every prompt would silently take its default —
-# installing everything unattended. Require a tty, or an explicit opt-in.
-ASSUME_YES="${REALISTIC_COST_ASSUME_YES:-0}"
-
+# This script modifies files in your home directory, so it must never proceed
+# on assumptions. If there is no terminal to ask (`curl | bash`, CI), we stop
+# and tell the caller to use the non-interactive flags instead.
 require_tty() {
-  [ "$ASSUME_YES" = "1" ] && return 0
-  if ! { exec 3</dev/tty; } 2>/dev/null; then
-    c_red "No interactive terminal available, and this installer modifies files in \$HOME."
-    c_dim "  Clone the repo and run ./setup.sh directly, or re-run with"
-    c_dim "  REALISTIC_COST_ASSUME_YES=1 to accept every prompt (installs both targets)."
+  if [ ! -r /dev/tty ]; then
+    c_red "No terminal available to confirm an interactive install."
+    echo   "Re-run attached to a terminal, or use the non-interactive flags:"
+    echo   "  ./setup.sh --target claude-code [--with-permissions] --yes"
+    echo   "  ./setup.sh --target opencode --yes"
+    echo   "  ./setup.sh --target both --yes"
     exit 1
   fi
-  exec 3<&-
 }
 
 confirm() {
   # confirm <prompt> [default(y|n)]
-  local prompt="$1" default="${2:-y}" choice
-  local hint
-  if [ "$ASSUME_YES" = "1" ]; then return 0; fi
+  local prompt="$1" default="${2:-y}" choice hint
+  [ "$ASSUME_YES" = "1" ] && return 0
+  require_tty
   if [ "$default" = "y" ]; then hint="[Y/n]"; else hint="[y/N]"; fi
-  read -r -p "$(c_bold "$prompt") $hint " choice </dev/tty
+  printf '\033[1m%s\033[0m %s ' "$prompt" "$hint"
+  read -r choice </dev/tty || choice=""
   choice="${choice:-$default}"
   case "$choice" in
     y|Y|yes|YES) return 0 ;;
@@ -55,15 +87,14 @@ pick_target() {
 
   Install realistic-cost for:
     1) Claude Code   (statusline + /realistic-cost skill + global CLI)
-    2) opencode       (/realistic-cost skill + global CLI; no status line*)
-    3) Both           (recommended)
+    2) opencode      (/realistic-cost skill + TUI sidebar + global CLI)
+    3) Both          (recommended)
     4) Cancel
-
-  * opencode has no status-line bar; only the skill + CLI are installed there.
 MENU
   local sel
-  if [ "$ASSUME_YES" = "1" ]; then echo "3"; return 0; fi
-  read -r -p "$(c_bold 'Choose [1-4]')" sel </dev/tty
+  require_tty
+  printf '\033[1m%s\033[0m ' 'Choose [1-4]'
+  read -r sel </dev/tty || sel=""
   sel="${sel:-3}"
   echo "$sel"
 }
@@ -72,7 +103,9 @@ MENU
 
 build_and_link() {
   c_cyan "▸ Building realistic-cost in $REPO_DIR ..."
-  ( cd "$REPO_DIR" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null )
+  # Build errors are shown, not swallowed — a silent build failure here
+  # surfaces much later as a confusing "not on PATH" warning.
+  ( cd "$REPO_DIR" && npm install --silent && npm run build --silent )
   c_cyan "▸ Linking CLI globally (realistic-cost on PATH) ..."
   if command -v npm >/dev/null 2>&1; then
     ( cd "$REPO_DIR" && npm link --silent 2>/dev/null ) || npm install -g "$REPO_DIR" --silent 2>/dev/null || true
@@ -89,65 +122,21 @@ build_and_link() {
 install_claude_code() {
   c_cyan "▸ Installing Claude Code integration into $CLAUDE_DIR ..."
   mkdir -p "$CLAUDE_DIR/skills"
-  cp "$REPO_DIR/claude-code/statusline.sh" "$CLAUDE_DIR/statusline.sh"
-  chmod +x "$CLAUDE_DIR/statusline.sh"
-  cp "$REPO_DIR/claude-code/print-cost.sh" "$CLAUDE_DIR/print-cost.sh"
-  chmod +x "$CLAUDE_DIR/print-cost.sh"
-  # rm first: `cp -R src dst` nests as dst/realistic-cost when dst exists,
-  # so a second run would create skills/realistic-cost/realistic-cost.
+  install -m 0755 "$REPO_DIR/claude-code/statusline.sh" "$CLAUDE_DIR/statusline.sh"
+  install -m 0755 "$REPO_DIR/claude-code/print-cost.sh" "$CLAUDE_DIR/print-cost.sh"
+  # rm first: `cp -R src dst` nests into dst when dst exists, so a second run
+  # would otherwise create skills/realistic-cost/realistic-cost/.
   rm -rf "${CLAUDE_DIR:?}/skills/realistic-cost"
   cp -R "$REPO_DIR/claude-code/skills/realistic-cost" "$CLAUDE_DIR/skills/realistic-cost"
   c_green "  ✓ statusline.sh + print-cost.sh + skill installed"
 
-  local settings="$CLAUDE_DIR/settings.json"
-  if [ ! -f "$settings" ]; then
-    cp "$REPO_DIR/claude-code/settings.example.json" "$settings"
-    c_green "  ✓ created $settings"
-  elif command -v node >/dev/null 2>&1; then
-    # Always take a fresh timestamped backup — settings.json holds the user's
-    # own hooks and status line, and a lossy edit here is unrecoverable.
-    local backup
-    backup="$settings.bak-realistic-cost-$(date +%Y%m%d%H%M%S)"
-    cp "$settings" "$backup"
-    c_dim "  · backed up $settings -> $(basename "$backup")"
-
-    node -e '
-      const fs = require("fs");
-      const p = process.argv[1];
-      const s = JSON.parse(fs.readFileSync(p, "utf8"));
-      const STATUSLINE = "~/.claude/statusline.sh";
-      const HOOK = "~/.claude/print-cost.sh";
-      const notes = [];
-
-      // statusLine: only one can exist, so replacing it is the install. Report
-      // the displaced command instead of silently dropping it.
-      const prev = s.statusLine && s.statusLine.command;
-      if (prev && prev !== STATUSLINE) notes.push("replaced statusLine (was: " + prev + ")");
-      s.statusLine = { type: "command", command: STATUSLINE, padding: 2 };
-
-      // hooks.Stop: MERGE. Other tools register Stop hooks here; assigning the
-      // array destroys them.
-      s.hooks = s.hooks || {};
-      const stop = Array.isArray(s.hooks.Stop) ? s.hooks.Stop : [];
-      const has = stop.some((g) => (g && Array.isArray(g.hooks) ? g.hooks : []).some((h) => h && h.command === HOOK));
-      if (!has) stop.push({ matcher: "", hooks: [{ type: "command", command: HOOK }] });
-      s.hooks.Stop = stop;
-      if (stop.length > 1) notes.push("kept " + (stop.length - 1) + " existing Stop hook group(s)");
-
-      s.permissions = s.permissions || {};
-      s.permissions.allow = Array.from(new Set([
-        ...(s.permissions.allow || []),
-        "Bash(realistic-cost:*)",
-        "Bash(~/.claude/statusline.sh:*)",
-        "Bash(~/.claude/print-cost.sh:*)",
-      ]));
-      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-      for (const n of notes) console.log("  · " + n);
-    ' "$settings"
-    c_green "  ✓ updated $settings (statusLine + Stop hook + permissions)"
-  else
-    c_yellow "  ! node not found — add statusLine key to $settings manually"
-  fi
+  # configure-settings.mjs is the single implementation of the settings merge:
+  # it backs up first, appends the Stop hook instead of replacing the array,
+  # and remembers any statusLine it displaces so uninstall can restore it.
+  c_cyan "▸ Updating $CLAUDE_DIR/settings.json ..."
+  node "$REPO_DIR/claude-code/configure-settings.mjs" install \
+    "$CLAUDE_DIR/settings.json" $WITH_PERMISSIONS
+  c_green "  ✓ settings.json updated"
 }
 
 # ───────────────────────── opencode ─────────────────────────
@@ -155,7 +144,7 @@ install_claude_code() {
 install_opencode() {
   c_cyan "▸ Installing opencode skill + TUI sidebar plugin..."
 
-  # Skill (slash command)
+  # Skill (slash command). rm first — see the note in install_claude_code.
   mkdir -p "$OPENCODE_DIR/skills"
   rm -rf "${OPENCODE_DIR:?}/skills/realistic-cost"   # see note in install_claude_code
   cp -R "$REPO_DIR/opencode/skills/realistic-cost" "$OPENCODE_DIR/skills/realistic-cost"
@@ -200,7 +189,13 @@ main() {
   require_tty
 
   local sel
-  sel="$(pick_target)"
+  case "$TARGET" in
+    claude-code|claude) sel=1 ;;
+    opencode)           sel=2 ;;
+    both)               sel=3 ;;
+    "")                 sel="$(pick_target)" ;;
+    *) c_red "Invalid --target: '$TARGET' (expected claude-code, opencode or both)"; exit 2 ;;
+  esac
   echo
 
   case "$sel" in

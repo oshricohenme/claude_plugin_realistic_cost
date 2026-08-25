@@ -18,6 +18,8 @@ const BASE_RATE: Record<FileDomain, number> = {
   backend: 12,
   frontend: 15,
   fullstack: 13,
+  // Migrations and schema changes are slow and high-blast-radius per line.
+  data: 10,
   docs: 30,
   config: 8,
   test: 20,
@@ -25,7 +27,7 @@ const BASE_RATE: Record<FileDomain, number> = {
   other: 10,
 }
 
-/** Per-write complexity multipliers (product capped at MAX_MULTIPLIER). */
+/** Per-write complexity multipliers. */
 const COMPLEXITY = {
   /** Full-file Write (new file) — setting up a file from scratch. */
   newFile: 1.5,
@@ -33,14 +35,17 @@ const COMPLEXITY = {
   largeChangeThreshold: 100,
   largeChange: 1.3,
 }
-const MAX_MULTIPLIER = 6.0
 const DELETION_FACTOR = 0.3
 const DESIGN_ASSET_HOURS_EACH = 2
 
 /**
- * Default model parameters. Keys MUST match EstimateOptions exactly —
- * `opts()` merges user overrides over these by name, so a key mismatch
- * silently disables the option (regression-tested in test/estimate.test.ts).
+ * Default model parameters — the single source of truth for every tunable in
+ * the model. cost.ts resolves its own options through `resolveEstimateOptions`
+ * below rather than restating these, so the role model and the receipt cannot
+ * be tuned apart (regression-tested in test/estimate.test.ts).
+ *
+ * Keys MUST match EstimateOptions exactly: the merge is by name, so a typo
+ * silently disables the option.
  */
 export const ESTIMATE_DEFAULTS: Required<EstimateOptions> = {
   reviewOverheadMultiplier: 0.35,
@@ -48,17 +53,19 @@ export const ESTIMATE_DEFAULTS: Required<EstimateOptions> = {
   qaWithTestsMultiplier: 0.35,
   designOverheadMultiplier: 0.6,
   pmOverheadMultiplier: 0.15,
-  emOverheadMultiplier: 0.10,
+  emOverheadMultiplier: 0.1,
   devopsDeployMultiplier: 0.15,
   securitySensitiveMultiplier: 0.15,
   securityNormalMultiplier: 0.05,
   techwriterOverheadMultiplier: 0.1,
+  thinkingCostPerToken: 0.05,
   discoverySearchHours: 0.25,
   discoveryReadHours: 0.15,
   discoveryThinkingHours: 0.1,
 }
 
-function opts(o?: EstimateOptions): Required<EstimateOptions> {
+/** Merge user overrides over the model defaults. */
+export function resolveEstimateOptions(o?: EstimateOptions): Required<EstimateOptions> {
   return { ...ESTIMATE_DEFAULTS, ...o }
 }
 
@@ -70,8 +77,19 @@ const pct = (x: number): string => `${Math.round(x * 100)}%`
 
 function emptyDomainBreakdown(): EstimateResult["domainBreakdown"] {
   const out = {} as EstimateResult["domainBreakdown"]
-  const domains: FileDomain[] = ["backend", "frontend", "fullstack", "docs", "config", "test", "design", "other"]
-  for (const d of domains) out[d] = { files: 0, newFiles: 0, linesAdded: 0, weightedLinesAdded: 0, linesRemoved: 0, hours: 0 }
+  const domains: FileDomain[] = [
+    "backend",
+    "frontend",
+    "fullstack",
+    "data",
+    "docs",
+    "config",
+    "test",
+    "design",
+    "other",
+  ]
+  for (const d of domains)
+    out[d] = { files: 0, newFiles: 0, linesAdded: 0, weightedLinesAdded: 0, linesRemoved: 0, hours: 0 }
   return out
 }
 
@@ -83,7 +101,7 @@ function writeMultiplier(w: FileWriteOp): number {
   let mult = 1
   if (w.tool === "Write") mult *= COMPLEXITY.newFile
   if (w.linesAdded > COMPLEXITY.largeChangeThreshold) mult *= COMPLEXITY.largeChange
-  return Math.min(mult, MAX_MULTIPLIER)
+  return mult
 }
 
 function aggregateWrites(writes: FileWriteOp[]) {
@@ -125,11 +143,8 @@ function domainHours(breakdown: EstimateResult["domainBreakdown"]): void {
 // estimateHours
 // ---------------------------------------------------------------------------
 
-export function estimateHours(
-  stats: TranscriptStats,
-  options?: EstimateOptions,
-): EstimateResult {
-  const o = opts(options)
+export function estimateHours(stats: TranscriptStats, options?: EstimateOptions): EstimateResult {
+  const o = resolveEstimateOptions(options)
 
   const domainBreakdown = aggregateWrites(stats.fileWrites)
   domainHours(domainBreakdown)
@@ -177,6 +192,7 @@ export function estimateHours(
   }
   impl.techwriter = domainBreakdown.docs.hours
   impl.devops = domainBreakdown.config.hours
+  impl.data = domainBreakdown.data.hours
   impl.qa = domainBreakdown.test.hours
   impl.designer = domainBreakdown.design.hours
   // "other" domain: allocate to backend (most common fallback).
@@ -210,10 +226,11 @@ export function estimateHours(
   const FE = impl.frontend
   const FS = impl.fullstack
   const DEVOPS_IMPL = impl.devops
+  const DATA_IMPL = impl.data
   const DOC = impl.techwriter
   const DESIGN_IMPL = impl.designer
 
-  const implHours = BE + FE + FS + DEVOPS_IMPL + DOC + impl.qa
+  const implHours = BE + FE + FS + DEVOPS_IMPL + DATA_IMPL + DOC + impl.qa
 
   // "Tests written" means test-domain files were written — any Write at all
   // does NOT qualify (a session that only wrote prod code still needs full
@@ -225,12 +242,7 @@ export function estimateHours(
   const hasFrontendWork = FE + FS > 0
 
   const roles: RoleEstimate[] = []
-  const push = (
-    role: RoleId,
-    implementationHours: number,
-    overheadHours: number,
-    note: string,
-  ) => {
+  const push = (role: RoleId, implementationHours: number, overheadHours: number, note: string) => {
     roles.push({
       role,
       title: ROLES[role].title,
@@ -246,12 +258,22 @@ export function estimateHours(
     switch (id) {
       case "backend": {
         const review = BE * o.reviewOverheadMultiplier
-        push("backend", BE, review, `Implementation ${BE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`)
+        push(
+          "backend",
+          BE,
+          review,
+          `Implementation ${BE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`,
+        )
         break
       }
       case "frontend": {
         const review = FE * o.reviewOverheadMultiplier
-        push("frontend", FE, review, `Implementation ${FE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`)
+        push(
+          "frontend",
+          FE,
+          review,
+          `Implementation ${FE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`,
+        )
         break
       }
       case "fullstack": {
@@ -327,9 +349,18 @@ export function estimateHours(
         )
         break
       }
-      case "data":
-        push("data", 0, 0, `No data-engineer work (migrations tracked under devops/data domains)`)
+      case "data": {
+        const review = DATA_IMPL * o.reviewOverheadMultiplier
+        push(
+          "data",
+          DATA_IMPL,
+          review,
+          DATA_IMPL > 0
+            ? `Schema/migrations ${DATA_IMPL.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`
+            : `No schema or migration files touched`,
+        )
         break
+      }
     }
   }
 
@@ -349,5 +380,3 @@ function sumWriteLines(writes: FileWriteOp[]): number {
   for (const w of writes) n += w.linesAdded + w.linesRemoved
   return n
 }
-
-

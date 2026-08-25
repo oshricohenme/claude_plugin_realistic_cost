@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "pre-ai-dev-cost-receipt",
+  "owner": {
+    "name": "Oshri Cohen",
+    "url": "https://oshricohen.me"
+  },
+  "description": "Marketplace for realistic-cost — the pre-AI human engineering cost receipt for Claude Code sessions.",
+  "version": "0.4.0",
+  "plugins": [
+    {
+      "name": "realistic-cost",
+      "source": "./",
+      "displayName": "Realistic Cost — Pre-AI Dev Cost Receipt",
+      "description": "Estimate what a 100% human-driven engineering team would have cost to produce the work in this session. Adds /realistic-cost (full receipt + exports) and a Stop hook that prints a running cost line every 5 turns.",
+      "version": "0.4.0",
+      "author": {
+        "name": "Oshri Cohen",
+        "url": "https://oshricohen.me"
+      },
+      "homepage": "https://github.com/oshricohenme/claude_plugin_realistic_cost#readme",
+      "repository": "https://github.com/oshricohenme/claude_plugin_realistic_cost",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": ["cost", "estimation", "engineering-management", "reporting", "statusline", "ai-coding"]
+    }
+  ]
+}

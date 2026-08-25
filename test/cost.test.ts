@@ -5,7 +5,7 @@ import { strictEqual, ok } from "node:assert"
 function approx(actual: number, expected: number, delta: number, msg?: string): void {
   ok(Math.abs(actual - expected) <= delta, msg ?? `${actual} ≉ ${expected} (±${delta})`)
 }
-import { computeCost, estimateHours, formatStatusLine } from "../src/core/index.js"
+import { computeCost, emptyStats, estimateHours, formatMoney, formatStatusLine } from "../src/core/index.js"
 import type { TranscriptStats } from "../src/core/index.js"
 
 function stats(overrides: Partial<TranscriptStats> = {}): TranscriptStats {
@@ -88,7 +88,11 @@ test("aiCost flows through CostOptions instead of post-hoc mutation", () => {
 
 test("estimateOptions thread through to the receipt", () => {
   const est2 = estimateHours(S, { reviewOverheadMultiplier: 0.9 })
-  const r = computeCost({ stats: S, estimate: est2, options: { estimateOptions: { reviewOverheadMultiplier: 0.9 } } })
+  const r = computeCost({
+    stats: S,
+    estimate: est2,
+    options: { estimateOptions: { reviewOverheadMultiplier: 0.9 } },
+  })
   const base = computeCost({ stats: S, estimate: EST })
   const review = (rep: typeof base) => rep.activities.find((a) => a.activity === "Peer Review")!
   ok(review(r).cost > review(base).cost, "review multiplier affects receipt")
@@ -104,6 +108,30 @@ test("statusline format is one line and contains the totals", () => {
   const line = formatStatusLine(REPORT)
   strictEqual(line.split("\n").length, 1)
   ok(line.includes("Pre-AI"))
-  ok(line.includes(REPORT.totalCost.toFixed(0)))
+  // Amounts are currency-formatted (thousands separators), so compare against
+  // the formatter rather than a raw toFixed().
+  ok(line.includes(formatMoney(REPORT.totalCost, REPORT.currency)), `statusline shows the total: "${line}"`)
   ok(line.includes(REPORT.totalHours.toFixed(1) + "h"))
+})
+
+test("rates file currency is honoured in the output", () => {
+  const eur = computeCost({ stats: S, estimate: EST, options: { currency: "EUR" } })
+  strictEqual(eur.currency, "EUR")
+  ok(formatStatusLine(eur).includes("€"), "amounts render in the configured currency")
+})
+
+test("no line item renders a zero quantity next to a real amount", () => {
+  // A read-only, pure-reasoning session: no writes at all, so there is no
+  // engineering blend to derive hours from. Every printed row must still show
+  // hours that justify its amount.
+  const readOnly = {
+    ...emptyStats(),
+    thinkingTokens: 8000,
+    toolCalls: { ...emptyStats().toolCalls, read: 12, total: 12 },
+  }
+  const report = computeCost({ stats: readOnly, estimate: estimateHours(readOnly) })
+  for (const a of report.activities) {
+    ok(a.hours >= 0.05, `"${a.activity}" must not render as 0.0h with ${a.cost} of cost`)
+  }
+  ok(report.totalHours > 0 && report.totalCost > 0, "a reasoning-only session still has hours and cost")
 })

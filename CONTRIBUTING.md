@@ -1,12 +1,14 @@
 # Contributing to realistic-cost
 
-Thanks for your interest in contributing!
+Thanks for your interest in contributing.
 
 ## Requirements
 
-- **Node.js 20.6+** — both to develop (the test runner uses `node --import tsx`)
-  and to run the published CLI. This matches `engines.node` in `package.json`.
-- npm (or a compatible package manager).
+- **Node.js 20.6+** — required both to develop and to run the CLI
+  (`engines.node` is `>=20.6`; the test runner uses `node --test --import tsx`).
+- npm, or a compatible package manager.
+- **Bun** and **opencode 1.4.3+**, only if you are touching the opencode TUI
+  plugin.
 
 ## Setup
 
@@ -21,9 +23,16 @@ npm run build
 
 ```bash
 npm run dev        # run the CLI directly from TypeScript source
-npm test           # run the test suite (node:test + tsx)
-npm run typecheck  # strict tsc, no emit
+npm test           # node:test + tsx
+npm run typecheck  # strict tsc over src/
+npm run lint       # eslint
+npm run format     # prettier --check
+npm run check      # typecheck + lint + format + test — run before opening a PR
 npm run build      # compile to dist/
+
+# Only if you touched the opencode plugin (needs bun):
+cd opencode && bun install && cd ..
+npm run typecheck:opencode
 ```
 
 To iterate on either harness integration in a live session:
@@ -48,39 +57,72 @@ this repo's `.claude/skills/` as a project-level skill. It also exports
 a published `realistic-cost` is installed globally. Your global Claude Code
 config is left untouched.
 
+## Architecture
+
+There is **one engine**, in `src/core/`. It has no harness dependencies.
+
+Everything else is a thin adapter over it:
+
+- `src/cli/` — the `realistic-cost` command
+- `claude-code/` — status line, Stop hook, slash command, installers
+- `opencode/plugins/realistic-cost-tui.tsx` — reads opencode session state,
+  renders the TUI, and **imports** `pre_ai_dev_cost_receipt/core`
+
+The opencode plugin used to inline its own copy of the engine. It drifted — the
+two produced different totals for the same session — so the copy was deleted.
+**Do not reintroduce one.** If the plugin needs something from the engine,
+export it from `src/core/index.ts`.
+
+The plugin has its own tsconfig (`tsconfig.opencode.json`) because it resolves
+JSX and its host API through bun. It is checked by `npm run typecheck:opencode`
+and by the `opencode-plugin` CI job — deliberately _not_ by `npm run typecheck`,
+which must stay runnable with npm alone. The plugin was previously excluded from
+typechecking altogether, which is exactly how the drift went unnoticed; keep the
+CI job green.
+
 ## The cost model
 
-The estimation model is documented in `src/core/types.ts` (the header comment
-is the spec) and implemented in `src/core/estimate.ts` and `src/core/cost.ts`.
+The spec is the header comment in `src/core/types.ts`; the implementation is
+`src/core/estimate.ts` and `src/core/cost.ts`. Model parameters have a single
+home: `ESTIMATE_DEFAULTS` in `estimate.ts`. `cost.ts` resolves through
+`resolveEstimateOptions()` rather than restating them.
 
 If you change the model:
 
 1. Update the spec comment in `src/core/types.ts`.
-2. Update the implementation in `src/core/estimate.ts` / `src/core/cost.ts`.
-3. Update the model tables in `README.md`.
-4. Add or update golden-number tests that pin the changed behavior.
-5. Note that `opencode/plugins/realistic-cost-tui.tsx` inlines a copy of the
-   engine and must be kept in sync (see "Limitations" in the README).
+2. Update the implementation.
+3. Add the knob to `MODEL_FLAGS` in `src/cli/index.ts` if it is tunable — the
+   table drives help text and option plumbing, and a test asserts every
+   `EstimateOptions` key has a flag.
+4. Update the model tables in `README.md`.
+5. Add or update tests that pin the changed behaviour.
+6. Include the before/after estimate for a fixed example transcript in the PR,
+   so reviewers can see the impact.
+
+## Testing notes
+
+- Transcript fixtures must use **snake_case** tool inputs (`file_path`,
+  `old_string`, `new_string`) — that is what Claude Code actually writes. A
+  camelCase-only suite once stayed green while every `Edit` was being scored as
+  zero lines. Both spellings are supported and both are tested.
+- `test/installer.test.ts` runs the real `configure-settings.mjs` against a
+  sandbox settings file. Anything that touches `~/.claude/settings.json` must
+  keep those round-trip guarantees.
 
 ## Submitting changes
 
-1. Fork, create a feature branch.
+1. Fork and create a feature branch.
 2. Make your change with tests.
-3. Ensure `npm run typecheck && npm test && npm run build` pass.
+3. Ensure `npm run check` passes.
 4. Open a pull request describing what changed and why.
-
-For model changes (rates, multipliers, allocation rules), include the
-before/after estimate for a fixed example transcript so reviewers can see
-the impact.
 
 ## Reporting bugs
 
-Open an issue with:
+Open an issue with the [bug report template](https://github.com/oshricohenme/claude_plugin_realistic_cost/issues/new?template=bug_report.yml).
+For numbers that look wrong, use the
+[cost-model feedback template](https://github.com/oshricohenme/claude_plugin_realistic_cost/issues/new?template=model_feedback.yml).
 
-- Your OS, Node version, and how you installed (`setup.sh`, `npm i -g`, manual).
-- The command you ran and the output (redact any paths you don't want public).
-- If the numbers look wrong: the receipt output and, if possible, a synthetic
-  transcript that reproduces it.
+Security issues go through [SECURITY.md](SECURITY.md), not the public tracker.
 
 ## License
 
