@@ -1,9 +1,18 @@
 {
   "name": "realistic-cost",
-  "version": "0.2.0",
-  "description": "Realistic human-engineering-team cost estimator. Computes what a 100% human-driven team would cost across all job functions (EM, backend, frontend, design, QA, PM, DevOps, security, data, tech writing) and the real-world calendar time the work would take.",
+  "version": "0.3.0",
+  "description": "Estimate what a 100% human-driven engineering team would have cost to produce the work in an AI coding session \u2014 across every job function (PM, EM, design, backend, frontend, QA, DevOps, security, data, tech writing) \u2014 as a terminal receipt, status line, or exported report.",
   "type": "module",
   "license": "MIT",
+  "author": "Oshri Cohen",
+  "homepage": "https://github.com/oshricohenme/claude_plugin_realistic_cost#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oshricohenme/claude_plugin_realistic_cost.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oshricohenme/claude_plugin_realistic_cost/issues"
+  },
   "bin": {
     "realistic-cost": "./dist/bin/realistic-cost.js"
   },
@@ -11,45 +20,66 @@
   "types": "./dist/core/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
+      "default": "./dist/core/index.js"
     },
     "./core": {
+      "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
-    }
+      "default": "./dist/core/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
     "dev": "tsx src/bin/realistic-cost.ts",
-    "test": "node --test --import tsx test/smoke.test.ts test/estimate.test.ts test/cost.test.ts test/rates.test.ts test/transcript.test.ts test/cli.test.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    "test": "node scripts/run-tests.mjs",
+    "check": "npm run typecheck && npm run lint && npm run format && npm test",
+    "prepare": "node -e \"process.exit(require('fs').existsSync('.git')?0:1)\" && npm run build || exit 0",
+    "prepublishOnly": "npm run check && npm run build",
+    "typecheck:opencode": "tsc --noEmit -p tsconfig.opencode.json"
   },
   "files": [
     "dist",
     "claude-code",
-    "README.md"
+    "opencode/plugins",
+    "opencode/skills",
+    "opencode/package.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "dependencies": {
     "commander": "^12.1.0",
     "kleur": "^4.1.5"
   },
   "devDependencies": {
+    "@eslint/js": "^9.13.0",
     "@types/node": "^22.5.0",
+    "eslint": "^9.13.0",
+    "prettier": "^3.3.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.11.0"
   },
   "engines": {
     "node": ">=20.6"
   },
   "keywords": [
     "claude-code",
+    "opencode",
     "cost",
     "estimate",
     "engineering",
     "team",
     "plugin",
-    "statusline"
+    "statusline",
+    "ai-coding"
   ]
 }

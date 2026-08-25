@@ -1,0 +1,26 @@
+name: Cost-model feedback
+description: An estimate, rate, or multiplier that doesn't match reality
+labels: [model]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The model is a set of heuristics. Concrete counter-examples are the
+        best way to improve it.
+  - type: textarea
+    id: case
+    attributes:
+      label: The session
+      description: What was the work, and what did the receipt say it was worth?
+    validations: { required: true }
+  - type: textarea
+    id: expectation
+    attributes:
+      label: What would it really have cost?
+      description: Your own estimate, and how you arrived at it.
+    validations: { required: true }
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change
+      description: Which rate, multiplier or allocation rule is off, and in which direction?

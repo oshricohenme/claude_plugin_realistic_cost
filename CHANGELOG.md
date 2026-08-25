@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-24
+
+Correctness and safety release. Two of these were capable of damaging a user's
+configuration or silently reporting numbers that were about a third too low.
+
+### Fixed
+
+- **The installer destroyed existing Stop hooks.** `install.sh` and `setup.sh`
+  assigned `settings.hooks.Stop = [ours]` — a plain overwrite of a shared
+  array — so any Stop hook belonging to another tool was silently deleted.
+  `setup.sh` took no backup at all, and `install.sh` backed up only on its
+  first ever run. All settings edits now go through one implementation
+  (`claude-code/configure-settings.mjs`) which appends rather than replaces,
+  backs up on every run, and is covered by `test/installer.test.ts`.
+- **An existing `statusLine` was clobbered with no way back.** It is now
+  stashed on install and restored on uninstall. Ownership is matched on the
+  exact command, so a user's own `my-statusline.sh` is no longer mistaken for
+  ours by substring.
+- **Installers were not re-runnable.** `cp -R src dst` nests when `dst`
+  exists, so a second run produced
+  `skills/realistic-cost/realistic-cost/SKILL.md`.
+- **Every `Edit` and `MultiEdit` was counted as zero lines.** The parser read
+  `oldString`/`newString`, but Claude Code writes `old_string`/`new_string`.
+  Real edit-heavy sessions were under-priced by roughly 30%. Both spellings
+  are now accepted, and the test fixtures use the real format.
+- **`review` and `status` could hang forever.** `readStdin` waited for end-of-
+  stream on any non-TTY stdin, including a pipe nobody ever writes to — which
+  is exactly what the `/realistic-cost` skill produces when it shells out.
+  There is now a first-byte timeout.
+- **The opencode plugin had drifted into a different cost model** — a
+  different grand-total formula (`X/0.55` vs `(X+PM+EM)/0.80`), no new-file
+  multiplier, and the QA-rate bug that was fixed in the core in 0.2.0. The
+  inlined copy of the engine is deleted; the plugin now imports
+  `realistic-cost/core`, so the two harnesses cannot disagree. The plugin is
+  also typechecked for the first time (`tsconfig.opencode.json`), which
+  immediately surfaced a wrong theme type, a non-existent `event.off` call,
+  and a route-narrowing bug.
+- **`cost.ts` restated the whole model-defaults table**, so tuning the role
+  model and the receipt could diverge. Both now resolve through
+  `ESTIMATE_DEFAULTS`, pinned by a test.
+- **Line items could print `0.0h` next to a real amount.** With no coding in
+  the session the blended rate was zero, so thinking and coordination hours
+  collapsed while their costs did not. There is now a guaranteed-positive
+  billing rate, and rows below the display threshold are dropped so printed
+  hours always justify printed amounts.
+- **Model-flag validation messages named no flag** — `[ <-]` matched the
+  leading dash, so every message began `" must be a number ≥ 0"`.
+- **`MODEL_FLAG_HELP.slice(0, 13)`** silently dropped any flag appended to the
+  table. Flags are now table-driven, with a test asserting every model
+  parameter is reachable from the CLI.
+- **`--transcript` pointing at a missing file reported $0** instead of failing.
+- **`currency` in a rates file was parsed and ignored.** Amounts now format in
+  the configured ISO 4217 currency. Unknown roles and invalid rates in a rates
+  file are reported instead of silently dropped.
+- **`defaultRates()` returned a shared mutable object** that any caller could
+  poison for every later estimate.
+- Temp files (`print-cost.sh` counters, the statusline parse cache) moved from
+  predictable paths in a world-writable directory into a private per-user
+  directory, closing a symlink-redirect hole. `print-cost.sh` honours `TMPDIR`
+  and parses its JSON payload with node rather than `sed`.
+- Chrome no longer runs with `--no-sandbox` except as root, where it will not
+  start otherwise.
+- `--out report.v2` no longer produces a PDF named `.v2`, and the HTML
+  fallback can no longer overwrite the file it is falling back from.
+
+### Added
+
+- **Data Engineer is a real role.** It was hardcoded to zero hours. SQL,
+  migrations, `schema.prisma`, dbt and ETL paths now classify as a `data`
+  domain and bill to it.
+- **Per-role breakdown in the terminal receipt** ("Who Would Have Done It").
+  The role table existed but was reachable only via `--json`.
+- **`--format md`** — `formatMarkdown` existed with no way to invoke it.
+- `--thinking-cost-per-token`, exposing the model's single most influential
+  constant, which was the only parameter without a flag.
+- `--with-permissions` on the installers. Permission entries are no longer
+  written to `~/.claude/settings.json` without being asked for.
+- `setup.sh --target <claude-code|opencode|both> --yes` for non-interactive
+  installs. Without a terminal, setup.sh now refuses to proceed instead of
+  defaulting to "install everything, yes to everything".
+- ESLint, Prettier and EditorConfig; `npm run check` runs the full gate.
+- CI now covers Windows and Node 24, runs the linters, and shellchecks the
+  shell scripts.
+- `SECURITY.md` (including exactly what the tool reads, writes and executes),
+  `CODE_OF_CONDUCT.md`, issue and PR templates, Dependabot.
+
+### Changed
+
+- Package metadata: `repository`, `homepage`, `bugs`, `author`; `exports` now
+  lists `types` first (TypeScript requires it) and has a `default` condition;
+  a `prepare` script so a git install builds itself.
+- The status line and Stop hook no longer fall back to `npx --yes realistic-cost`
+  — resolving a package from the registry inside a status-line refresh is both
+  slow and a supply-chain risk.
+- Dead code removed: `renderHtml`, an unused `tool_use_id` map, a no-op
+  `process.exitCode = 0`, an unreachable `MAX_MULTIPLIER`, and roughly 380
+  lines of duplicated engine plus four unused helpers in the opencode plugin.
+- README rewritten with per-harness install paths, and its sample output is
+  now generated from a real run rather than written by hand.
+- Both `SKILL.md` files described a receipt format that no longer existed
+  (line items named "Speccing & Research", "Documentation").
+
 ## [0.2.0] - 2026-08-21
 
 ### Fixed

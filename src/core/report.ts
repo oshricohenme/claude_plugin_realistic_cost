@@ -1,21 +1,50 @@
 import kleur from "kleur"
 import type { CostReport, ActivityCost, ActivitySection } from "./types.js"
 
+function format(n: number, currency: string, fractionDigits: number): string {
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    }).format(n)
+  } catch {
+    // Unknown/typo'd currency code: degrade to something readable rather than
+    // throwing mid-render.
+    return `${currency} ${n.toLocaleString("en-US", {
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    })}`
+  }
+}
+
+/**
+ * Format an estimated amount. Estimates are rounded to whole units — the
+ * model is not precise to the cent and printing cents implies it is.
+ */
+export function formatMoney(n: number, currency = "USD"): string {
+  return format(Math.round(n), currency, 0)
+}
+
+/**
+ * Format a measured amount (the actual AI spend), where cents are real data
+ * and rounding them away loses information.
+ */
+export function formatMoneyPrecise(n: number, currency = "USD"): string {
+  return format(n, currency, 2)
+}
+
+/** Hourly rate, e.g. "$115/h". "—" when there is no meaningful rate. */
+export function formatRate(n: number, currency = "USD"): string {
+  if (n <= 0) return "—"
+  return formatMoney(n, currency) + "/h"
+}
+
 export function formatStatusLine(report: CostReport): string {
   const cal = report.calendar
-  const cost = report.totalCost
-  const hours = report.totalHours
-  const ai = report.aiCost > 0 ? ` | AI $${report.aiCost.toFixed(2)}` : ""
-  return `${kleur.cyan("Pre-AI")}: $${cost.toFixed(0)} · ${hours.toFixed(1)}h · ${cal.manDays.toFixed(1)} man-days${ai}`
-}
-
-function money(n: number): string {
-  return "$" + Math.round(n).toLocaleString("en-US")
-}
-
-function rateStr(n: number): string {
-  if (n <= 0) return "—"
-  return "$" + Math.round(n) + "/h"
+  const ai = report.aiCost > 0 ? ` | AI ${formatMoneyPrecise(report.aiCost, report.currency)}` : ""
+  return `${kleur.cyan("Pre-AI")}: ${formatMoney(report.totalCost, report.currency)} · ${report.totalHours.toFixed(1)}h · ${cal.manDays.toFixed(1)} man-days${ai}`
 }
 
 interface SectionTotals {
@@ -44,6 +73,8 @@ function getSections(activities: ActivityCost[]): Record<ActivitySection, Sectio
 
 export function formatMarkdown(report: CostReport): string {
   const cal = report.calendar
+  const money = (n: number) => formatMoney(n, report.currency)
+  const rateStr = (n: number) => formatRate(n, report.currency)
   const L: string[] = []
   const sec = getSections(report.activities)
   const grandTotal = report.totalCost
@@ -83,7 +114,9 @@ export function formatMarkdown(report: CostReport): string {
   L.push("_(meetings, emails, slack, status updates)_")
   L.push("")
   L.push(mdTable(sec.coordination.items, true))
-  L.push(`| **Coordination Tax Total** | **${sec.coordination.hours.toFixed(1)}h** | | **${money(sec.coordination.cost)}** |`)
+  L.push(
+    `| **Coordination Tax Total** | **${sec.coordination.hours.toFixed(1)}h** | | **${money(sec.coordination.cost)}** |`,
+  )
   L.push("")
   L.push(`> ${coordPct.toFixed(0)}% of grand total is coordination overhead`)
   L.push("")
@@ -99,7 +132,7 @@ export function formatMarkdown(report: CostReport): string {
   L.push(`- **${cal.manDays.toFixed(1)} man-days (${cal.humanReadable})**`)
   L.push("")
   if (report.aiCost > 0) {
-    L.push(`**AI cost:** $${report.aiCost.toFixed(2)}`)
+    L.push(`**AI cost:** ${formatMoneyPrecise(report.aiCost, report.currency)}`)
     L.push("")
   }
 
@@ -108,17 +141,21 @@ export function formatMarkdown(report: CostReport): string {
 
 export function formatHtml(report: CostReport): string {
   const cal = report.calendar
+  const money = (n: number) => formatMoney(n, report.currency)
+  const rateStr = (n: number) => formatRate(n, report.currency)
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   const sec = getSections(report.activities)
   const grandTotal = report.totalCost
   const coordPct = grandTotal > 0 ? (sec.coordination.cost / grandTotal) * 100 : 0
 
   const tableRows = (items: ActivityCost[], indent?: boolean) =>
-    items.map((a) => {
-      const rate = a.hours > 0 ? a.cost / a.hours : 0
-      const lbl = indent ? `&nbsp;&nbsp;${esc(a.activity)}` : esc(a.activity)
-      return `<tr><td>${lbl}</td><td class="n">${a.hours.toFixed(1)}h</td><td class="n">${rateStr(rate)}</td><td class="n">${money(a.cost)}</td></tr>`
-    }).join("\n")
+    items
+      .map((a) => {
+        const rate = a.hours > 0 ? a.cost / a.hours : 0
+        const lbl = indent ? `&nbsp;&nbsp;${esc(a.activity)}` : esc(a.activity)
+        return `<tr><td>${lbl}</td><td class="n">${a.hours.toFixed(1)}h</td><td class="n">${rateStr(rate)}</td><td class="n">${money(a.cost)}</td></tr>`
+      })
+      .join("\n")
 
   return `<!doctype html>
 <html lang="en">
@@ -182,7 +219,7 @@ ${tableRows(sec.coordination.items, true)}
 
 <h2>Effort</h2>
 <p><strong>${cal.manDays.toFixed(1)} man-days</strong> (${esc(cal.humanReadable)})</p>
-${report.aiCost > 0 ? `<p><strong>AI cost:</strong> $${report.aiCost.toFixed(2)}</p>` : ""}
+${report.aiCost > 0 ? `<p><strong>AI cost:</strong> ${esc(formatMoneyPrecise(report.aiCost, report.currency))}</p>` : ""}
 
 </body>
 </html>`

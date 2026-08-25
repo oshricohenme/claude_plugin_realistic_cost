@@ -2,7 +2,7 @@ import { test } from "node:test"
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { strictEqual, ok } from "node:assert"
+import { strictEqual } from "node:assert"
 import { parseTranscript, emptyStats, parseStatusLineStdin, classifyDomain } from "../src/core/index.js"
 
 function jsonl(lines: unknown[]): string {
@@ -20,8 +20,83 @@ function withTempTranscript(content: string, fn: (path: string) => void): void {
   }
 }
 
-const assistantWrite = (path: string, content: string, id = "u1") =>
-  ({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name: "Write", input: { filePath: path, content } }] } })
+const assistantWrite = (path: string, content: string, id = "u1") => ({
+  type: "assistant",
+  message: {
+    role: "assistant",
+    content: [{ type: "tool_use", id, name: "Write", input: { filePath: path, content } }],
+  },
+})
+
+const toolUse = (name: string, input: Record<string, unknown>, id = "u1") => ({
+  type: "assistant",
+  message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+})
+
+// ---------------------------------------------------------------------------
+// Tool-input key casing.
+//
+// Claude Code records tool inputs in snake_case (file_path, old_string,
+// new_string). Reading only camelCase scored every Edit as zero lines, which
+// silently under-priced real sessions by ~30% while a camelCase-only test
+// suite stayed green. These tests pin BOTH spellings.
+// ---------------------------------------------------------------------------
+
+test("Edit line counts are identical for snake_case and camelCase inputs", () => {
+  const snake = toolUse("Edit", { file_path: "src/a.ts", old_string: "x\ny\n", new_string: "p\nq\nr\n" })
+  const camel = toolUse("Edit", { filePath: "src/a.ts", oldString: "x\ny\n", newString: "p\nq\nr\n" })
+  withTempTranscript(jsonl([snake]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.fileWrites[0].linesAdded, 3, "snake_case new_string counted")
+    strictEqual(s.fileWrites[0].linesRemoved, 2, "snake_case old_string counted")
+    strictEqual(s.fileWrites[0].path, "src/a.ts", "snake_case file_path read")
+  })
+  withTempTranscript(jsonl([camel]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.fileWrites[0].linesAdded, 3)
+    strictEqual(s.fileWrites[0].linesRemoved, 2)
+  })
+})
+
+test("Write and MultiEdit accept snake_case inputs", () => {
+  const write = toolUse("Write", { file_path: "src/new.ts", content: "1\n2\n3\n" }, "w1")
+  const multi = toolUse(
+    "MultiEdit",
+    {
+      file_path: "src/b.ts",
+      edits: [
+        { old_string: "a\n", new_string: "b\nc\n" },
+        { old_string: "d", new_string: "e\nf" },
+      ],
+    },
+    "m1",
+  )
+  withTempTranscript(jsonl([write, multi]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.fileWrites[0].linesAdded, 3, "Write content")
+    strictEqual(s.fileWrites[0].path, "src/new.ts")
+    strictEqual(s.fileWrites[1].linesAdded, 4, "MultiEdit new_string lines")
+    strictEqual(s.fileWrites[1].linesRemoved, 2, "MultiEdit old_string lines")
+  })
+})
+
+test("tool names are matched case-insensitively across harnesses", () => {
+  withTempTranscript(
+    jsonl([
+      toolUse("Read", { file_path: "src/a.ts" }, "r1"),
+      toolUse("read", { filePath: "src/b.ts" }, "r2"),
+      toolUse("Grep", { pattern: "x" }, "g1"),
+      toolUse("grep", { pattern: "y" }, "g2"),
+    ]),
+    (tp) => {
+      const s = parseTranscript(tp)
+      strictEqual(s.toolCalls.read, 2, "Read and read both count")
+      strictEqual(s.toolCalls.grep, 2, "Grep and grep both count")
+      strictEqual(s.toolCalls.other, 0, "nothing fell through to the default bucket")
+      strictEqual(s.filesReadPaths.length, 2, "read paths captured in both casings")
+    },
+  )
+})
 
 // ---------------------------------------------------------------------------
 // lineCount — regression for the trailing-newline off-by-one
@@ -58,7 +133,14 @@ test("Edit counts oldString as removed and newString as added", () => {
     type: "assistant",
     message: {
       role: "assistant",
-      content: [{ type: "tool_use", id: "u1", name: "Edit", input: { filePath: "src/a.ts", oldString: "x\ny\n", newString: "p\nq\nr\n" } }],
+      content: [
+        {
+          type: "tool_use",
+          id: "u1",
+          name: "Edit",
+          input: { filePath: "src/a.ts", oldString: "x\ny\n", newString: "p\nq\nr\n" },
+        },
+      ],
     },
   }
   withTempTranscript(jsonl([edit]), (tp) => {
@@ -78,7 +160,13 @@ test("MultiEdit sums across its edits array", () => {
           type: "tool_use",
           id: "u1",
           name: "MultiEdit",
-          input: { filePath: "src/a.ts", edits: [{ oldString: "a\n", newString: "b\nc\n" }, { oldString: "d", newString: "e\nf" }] },
+          input: {
+            filePath: "src/a.ts",
+            edits: [
+              { oldString: "a\n", newString: "b\nc\n" },
+              { oldString: "d", newString: "e\nf" },
+            ],
+          },
         },
       ],
     },
@@ -160,4 +248,15 @@ test("classifyDomain handles nested paths and edge cases", () => {
   strictEqual(classifyDomain("Makefile"), "config")
   strictEqual(classifyDomain("styles/theme.scss"), "frontend")
   strictEqual(classifyDomain("scripts/run.py"), "config")
+})
+
+test("data-engineering paths classify as the data domain", () => {
+  strictEqual(classifyDomain("db/migrations/0007_add_users.sql"), "data")
+  strictEqual(classifyDomain("prisma/schema.prisma"), "data")
+  strictEqual(classifyDomain("app/db/migrations/001_init.ts"), "data")
+  strictEqual(classifyDomain("queries/report.sql"), "data")
+  // Ordinary backend code is still backend.
+  strictEqual(classifyDomain("src/api/server.ts"), "backend")
+  // Tests and docs still win over data.
+  strictEqual(classifyDomain("test/migrations.test.ts"), "test")
 })

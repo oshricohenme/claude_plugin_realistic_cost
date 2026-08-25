@@ -10,6 +10,13 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENCODE_DIR="${OPENCODE_DIR:-$HOME/.config/opencode}"
+# Guard the rm -rf below: an empty OPENCODE_DIR would make SKILL_LINK an
+# absolute path rooted at /, and `set -u` does not catch an explicitly empty
+# variable.
+if [ -z "$OPENCODE_DIR" ]; then
+  echo "OPENCODE_DIR is empty — refusing to touch the filesystem" >&2
+  exit 1
+fi
 SKILL_LINK="$OPENCODE_DIR/skills/realistic-cost"
 
 c_dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
@@ -44,7 +51,7 @@ fi
 
 # ── build ──
 c_cyan "▸ Building realistic-cost (npm install + build)..."
-( cd "$REPO_DIR" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null )
+( cd "$REPO_DIR" && npm install --silent && npm run build --silent )
 c_green "  ✓ dist/ built"
 
 # ── link CLI globally so `realistic-cost` is on PATH ──

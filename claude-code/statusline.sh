@@ -10,6 +10,11 @@
 #
 # Silently no-ops if the binary isn't installed (Claude Code tolerates empty
 # output, so the built-in footer still renders).
+#
+# Deliberately does NOT fall back to `npx realistic-cost`: the status line
+# re-runs on every UI refresh, and resolving a package from the registry in
+# that loop would be both slow and a supply-chain risk. Install the CLI once
+# (./claude-code/install.sh) instead.
 
 # 1. Global install on PATH (preferred)
 if command -v realistic-cost >/dev/null 2>&1; then
@@ -21,21 +26,14 @@ if [ -x "$HOME/.local/bin/realistic-cost" ]; then
   exec "$HOME/.local/bin/realistic-cost" status
 fi
 
-# 3. Repo-local dev build (when run from a clone of this repo)
-RC_DEV="${RC_DEV:-}"
-if [ -z "$RC_DEV" ] && [ -f "$PWD/node_modules/.bin/realistic-cost" ]; then
-  RC_DEV="$PWD/node_modules/.bin/realistic-cost"
+# 3. Repo-local dev build (when Claude Code is running inside a clone of this
+#    repo). Paths are quoted so a checkout under a directory with spaces works.
+if [ -x "$PWD/node_modules/.bin/realistic-cost" ]; then
+  exec "$PWD/node_modules/.bin/realistic-cost" status
 fi
-if [ -z "$RC_DEV" ] && [ -x "$PWD/dist/bin/realistic-cost.js" ]; then
-  RC_DEV="node $PWD/dist/bin/realistic-cost.js"
-fi
-if [ -n "$RC_DEV" ]; then
-  exec $RC_DEV status
+if [ -f "$PWD/dist/bin/realistic-cost.js" ] && command -v node >/dev/null 2>&1; then
+  exec node "$PWD/dist/bin/realistic-cost.js" status
 fi
 
-# 4. Last resort: npx (adds latency on first run)
-if command -v npx >/dev/null 2>&1; then
-  npx --yes realistic-cost status 2>/dev/null
-fi
-
-# If nothing worked, print nothing — Claude Code shows its default footer.
+# Nothing installed: print nothing — Claude Code shows its default footer.
+exit 0

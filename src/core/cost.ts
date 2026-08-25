@@ -12,20 +12,13 @@ import type {
 } from "./types.js"
 import { ROLES, ROLE_ORDER } from "./roles.js"
 import { defaultRates, mergeRates } from "./rates.js"
+import { resolveEstimateOptions } from "./estimate.js"
 
 // ---------------------------------------------------------------------------
 // Compute cost + calendar from stats + estimate
 // ---------------------------------------------------------------------------
 
 const DEFAULT_HOURS_PER_DAY = 8
-
-/**
- * Thinking is billed by reasoning-token volume, not turns: deep reasoning on
- * a hard problem is what a senior engineer's (billable) thinking time maps
- * to. Calibrated so 10k reasoning tokens ≈ a focused half-day of human
- * design/analysis at a ~$100/h blended rate.
- */
-const THINKING_COST_PER_TOKEN = 0.05
 
 /**
  * Share of the grand total attributed to the coordination tax — meetings
@@ -35,9 +28,21 @@ const THINKING_COST_PER_TOKEN = 0.05
 const COORDINATION_TAX_SHARE = 0.2
 const COORDINATION_BUCKETS = 4
 
+/**
+ * A line item is dropped below this many hours. The receipt prints hours to
+ * one decimal, so anything under 0.05h renders as "0.0h" — and a row reading
+ * "0.0h ... $312" is a bug report waiting to happen. Because every activity's
+ * cost is `hours x a strictly positive rate`, filtering on hours alone also
+ * bounds the amount, and section subtotals are summed from the rows that
+ * survive this filter, so the printed hours always add up to the printed
+ * amounts.
+ */
+const MIN_DISPLAY_HOURS = 0.05
+
 interface CostOptionsInternal {
   hoursPerDay: number
   aiCost: number
+  currency: string
   estimateOptions: Required<EstimateOptions>
 }
 
@@ -45,22 +50,10 @@ function resolveOptions(o?: CostOptions): CostOptionsInternal {
   return {
     hoursPerDay: o?.productiveHoursPerDay ?? DEFAULT_HOURS_PER_DAY,
     aiCost: o?.aiCost ?? 0,
-    estimateOptions: {
-      reviewOverheadMultiplier: 0.35,
-      qaOverheadMultiplier: 0.5,
-      qaWithTestsMultiplier: 0.35,
-      designOverheadMultiplier: 0.6,
-      pmOverheadMultiplier: 0.15,
-      emOverheadMultiplier: 0.10,
-      devopsDeployMultiplier: 0.15,
-      securitySensitiveMultiplier: 0.15,
-      securityNormalMultiplier: 0.05,
-      techwriterOverheadMultiplier: 0.1,
-      discoverySearchHours: 0.25,
-      discoveryReadHours: 0.15,
-      discoveryThinkingHours: 0.1,
-      ...o?.estimateOptions,
-    },
+    currency: (o?.currency ?? "USD").toUpperCase(),
+    // Defaults come from estimate.ts so the receipt and the role model can
+    // never be tuned apart.
+    estimateOptions: resolveEstimateOptions(o?.estimateOptions),
   }
 }
 
@@ -70,6 +63,16 @@ function resolveOptions(o?: CostOptions): CostOptionsInternal {
 // and the SAME EstimateOptions, so the receipt and the role model cannot
 // drift apart.
 // ---------------------------------------------------------------------------
+
+type ActivityDraft = Omit<ActivityCost, "percentage">
+
+/**
+ * Keep a line item only if it will render as a non-zero quantity. See
+ * MIN_DISPLAY_HOURS — this is what stops "0.0h" rows carrying a real amount.
+ */
+function displayable(items: ActivityDraft[]): ActivityDraft[] {
+  return items.filter((a) => a.hours >= MIN_DISPLAY_HOURS)
+}
 
 function computeActivities(
   stats: TranscriptStats,
@@ -86,59 +89,102 @@ function computeActivities(
   const implH = (id: RoleId) => reMap.get(id)?.implementationHours ?? 0
   const ohH = (id: RoleId) => reMap.get(id)?.overheadHours ?? 0
 
-  const BE = implH("backend"), FE = implH("frontend"), FS = implH("fullstack")
-  const DEVOPS_I = implH("devops"), QA_I = implH("qa")
+  const BE = implH("backend"),
+    FE = implH("frontend"),
+    FS = implH("fullstack")
+  const DEVOPS_I = implH("devops"),
+    QA_I = implH("qa"),
+    DATA_I = implH("data")
   const DESIGN_I = implH("designer")
 
-  const codingTotalCost = BE * rates.backend + FE * rates.frontend + FS * rates.fullstack + DEVOPS_I * rates.devops + QA_I * rates.qa
-  const codingTotalHours = BE + FE + FS + DEVOPS_I + QA_I
-  const blendedRate = codingTotalHours > 0 ? codingTotalCost / codingTotalHours : 0
+  const codingTotalCost =
+    BE * rates.backend +
+    FE * rates.frontend +
+    FS * rates.fullstack +
+    DEVOPS_I * rates.devops +
+    DATA_I * rates.data +
+    QA_I * rates.qa
+  const codingTotalHours = BE + FE + FS + DEVOPS_I + DATA_I + QA_I
+
+  /**
+   * The rate used to convert a cost back into billable hours (thinking,
+   * coordination). It is the session's actual engineering blend when there was
+   * engineering work, and the plain average of the engineering rates when
+   * there was none — a read-only or pure-reasoning session still buys a
+   * senior engineer's time, and dividing by zero used to yield line items that
+   * printed "0.0h" next to a four-figure amount.
+   */
+  const engAverageRate = (rates.backend + rates.frontend + rates.fullstack) / 3
+  const blendedRate = codingTotalHours > 0 ? codingTotalCost / codingTotalHours : engAverageRate
 
   let codingHours = codingTotalHours - engineerReadHours
   let codingCost = codingTotalCost - engineerReadHours * blendedRate
-  if (codingHours <= 0.01 && (stats.toolCalls.write + stats.toolCalls.edit) > 0) {
+  if (codingHours <= 0.01 && stats.toolCalls.write + stats.toolCalls.edit > 0) {
     codingHours = stats.toolCalls.write * 0.5 + stats.toolCalls.edit * 0.3
     codingCost = codingHours * blendedRate
   }
 
-  const thinkingCost = stats.thinkingTokens * THINKING_COST_PER_TOKEN
-  const valueActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = ([
-    { activity: "Thinking", hours: blendedRate > 0 ? thinkingCost / blendedRate : 0, cost: thinkingCost, section: "value" as const },
-    { activity: "Code Comprehension", hours: engineerReadHours, cost: engineerReadHours * blendedRate, section: "value" as const },
-    { activity: "Coding", hours: codingHours, cost: codingCost, section: "value" as const },
-    { activity: "Design", hours: DESIGN_I + o.designOverheadMultiplier * (FE + FS), cost: (DESIGN_I + o.designOverheadMultiplier * (FE + FS)) * rates.designer, section: "value" as const },
-    { activity: "Peer Review", hours: o.reviewOverheadMultiplier * (BE + FE + FS + DEVOPS_I), cost: o.reviewOverheadMultiplier * (BE * rates.backend + FE * rates.frontend + FS * rates.fullstack + DEVOPS_I * rates.devops), section: "value" as const },
-    { activity: "QA & Testing", hours: ohH("qa"), cost: ohH("qa") * rates.qa, section: "value" as const },
-    { activity: "DevOps & Infra", hours: o.devopsDeployMultiplier * (BE + FE + FS), cost: o.devopsDeployMultiplier * (BE + FE + FS) * rates.devops, section: "value" as const },
-    { activity: "Security Review", hours: ohH("security"), cost: ohH("security") * rates.security, section: "value" as const },
-  ] as { activity: string; hours: number; cost: number; section: ActivitySection }[]).filter((a) => a.hours > 0.01 || a.cost > 0.01)
+  const thinkingCost = stats.thinkingTokens * o.thinkingCostPerToken
+  const designHours = DESIGN_I + o.designOverheadMultiplier * (FE + FS)
+  const deployHours = o.devopsDeployMultiplier * (BE + FE + FS)
+  const valueActs = displayable([
+    { activity: "Thinking", hours: thinkingCost / blendedRate, cost: thinkingCost, section: "value" },
+    {
+      activity: "Code Comprehension",
+      hours: engineerReadHours,
+      cost: engineerReadHours * blendedRate,
+      section: "value",
+    },
+    { activity: "Coding", hours: codingHours, cost: codingCost, section: "value" },
+    { activity: "Design", hours: designHours, cost: designHours * rates.designer, section: "value" },
+    {
+      activity: "Peer Review",
+      hours: o.reviewOverheadMultiplier * (BE + FE + FS + DEVOPS_I + DATA_I),
+      cost:
+        o.reviewOverheadMultiplier *
+        (BE * rates.backend +
+          FE * rates.frontend +
+          FS * rates.fullstack +
+          DEVOPS_I * rates.devops +
+          DATA_I * rates.data),
+      section: "value",
+    },
+    { activity: "QA & Testing", hours: ohH("qa"), cost: ohH("qa") * rates.qa, section: "value" },
+    { activity: "DevOps & Infra", hours: deployHours, cost: deployHours * rates.devops, section: "value" },
+    {
+      activity: "Security Review",
+      hours: ohH("security"),
+      cost: ohH("security") * rates.security,
+      section: "value",
+    },
+  ])
 
   // Management — taken verbatim from the role estimate's PM and EM totals
   // (max(3h, overhead x implHours)), so the receipt and the roles table
   // always agree on management cost.
   const pmCost = ohH("pm") * rates.pm
   const emCost = ohH("em") * rates.em
-  const mgmtActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = [
+  const mgmtActs = displayable([
     { activity: "Product Management", hours: ohH("pm"), cost: pmCost, section: "management" },
     { activity: "Engineering Management", hours: ohH("em"), cost: emCost, section: "management" },
-  ]
+  ])
 
   // Coordination tax — COORDINATION_TAX_SHARE of the grand total, split
   // evenly across buckets. Grand total T satisfies
   // T = X + pmCost + emCost + COORDINATION_TAX_SHARE * T.
   const X = valueActs.reduce((s, a) => s + a.cost, 0)
-  const T = (X + pmCost + emCost) / (1 - COORDINATION_TAX_SHARE)
+  const mgmtTotal = mgmtActs.reduce((s, a) => s + a.cost, 0)
+  const T = (X + mgmtTotal) / (1 - COORDINATION_TAX_SHARE)
   const bucketCost = (COORDINATION_TAX_SHARE * T) / COORDINATION_BUCKETS
-  const bucketHours = blendedRate > 0 ? bucketCost / blendedRate : 0
-  const coordActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = ([
-    { activity: "Meeting w/ Eng Manager", hours: bucketHours, cost: bucketCost, section: "coordination" as const },
-    { activity: "Meeting w/ PM", hours: bucketHours, cost: bucketCost, section: "coordination" as const },
-    { activity: "Meeting w/ DevOps", hours: bucketHours, cost: bucketCost, section: "coordination" as const },
-    { activity: "Issue Management", hours: bucketHours, cost: bucketCost, section: "coordination" as const },
-  ] as { activity: string; hours: number; cost: number; section: ActivitySection }[]).filter((a) => a.hours > 0.01 || a.cost > 0.01)
+  const bucketHours = bucketCost / blendedRate
+  const coordActs = displayable([
+    { activity: "Meeting w/ Eng Manager", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Meeting w/ PM", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Meeting w/ DevOps", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Issue Management", hours: bucketHours, cost: bucketCost, section: "coordination" },
+  ])
 
   const acts = [...mgmtActs, ...valueActs, ...coordActs]
-    .filter((a) => a.hours > 0.01 || a.cost > 0.01)
 
   const total = acts.reduce((s, a) => s + a.cost, 0)
   return acts
@@ -198,6 +244,7 @@ export function computeCost(input: {
     calendar,
     generatedAt: new Date().toISOString(),
     rates,
+    currency: o.currency,
     aiCost: o.aiCost,
     aiDurationMs: stats.durationMs,
     aiLinesAdded: stats.linesAdded,

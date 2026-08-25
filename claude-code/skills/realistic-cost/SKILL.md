@@ -1,29 +1,24 @@
 ---
-description: Show what a 100% human-driven engineering team would cost for this session. Use /realistic-cost to see the full receipt (line items, coordination tax, grand total), or /realistic-cost export pdf|png|html to export.
-argument-hint: "[review | export pdf|png|html]"
-allowed-tools: Bash(realistic-cost:*), Bash(npx realistic-cost:*), Read(~/.claude/projects/**)
+name: realistic-cost
+description: Show what a 100% human-driven engineering team would have cost for this session. Use /realistic-cost for the full receipt (line items, coordination tax, grand total, per-role breakdown), or /realistic-cost export pdf|png|html|md to export it.
+argument-hint: "[review | export pdf|png|html|md]"
+allowed-tools: Bash(realistic-cost:*)
 ---
 
 # /realistic-cost — Pre-AI Human Engineering Cost
 
-You are invoking the `realistic-cost` tool, which estimates what a fully
-human-driven engineering team (PM, EM, designer, backend, frontend, fullstack,
-QA, DevOps, security, data, tech writer) would cost to produce the work in the
-current Claude Code session.
+Estimates what a fully human-driven engineering team (PM, EM, designer,
+backend, frontend, full-stack, QA, DevOps, security, data engineer, tech
+writer) would have cost to produce the work in the current session.
 
-The tool reads the session transcript and the status-line metadata (lines
-added/removed, duration, tool-call counts) — **no source-code diffing**.
-
-The output is formatted as a **receipt**: direct work line items (Speccing &
-Research, Thinking, Code Comprehension, Coding, Design, Documentation) with a
-subtotal, then Coordination Tax (Peer Review, Management, QA, DevOps, Security)
-with its own subtotal and overhead percentage, and a bold Grand Total.
+It reads the session transcript and status-line metadata — lines added and
+removed, duration, tool-call counts, thinking volume. No source-code diffing.
 
 ## Steps
 
-1. Determine the invocation. The user's arguments are in `$ARGUMENTS`.
-   - If `$ARGUMENTS` is empty or `review`: run a **review**.
-   - If it starts with `export`: run an **export** with the format (default `html`).
+1. Read `$ARGUMENTS`:
+   - empty or `review` → run a **review**
+   - starts with `export` → run an **export** with the given format (default `html`)
 
 2. Run the matching command. The binary auto-discovers the current session's
    transcript from `~/.claude/projects/`, so no path is needed.
@@ -34,24 +29,43 @@ with its own subtotal and overhead percentage, and a bold Grand Total.
 realistic-cost review
 ```
 
-If `realistic-cost` is not on PATH, try `npx --yes realistic-cost review`.
+Print the receipt it outputs **verbatim, inside a code block**. The output has
+four parts, in this order:
 
-Print the full colored receipt it outputs to the terminal, verbatim, inside a
-code block so the user sees the line items and totals. Then give a 1–2 sentence
-plain-language summary of the headline numbers (total cost, man-days effort).
+1. **Management Overhead** — Product Management, Engineering Management.
+2. **Value Creation** — Thinking, Code Comprehension, Coding, Design, Peer
+   Review, QA & Testing, DevOps & Infra, Security Review. Line items with no
+   corresponding work are omitted rather than shown as zero.
+3. **Coordination Tax** — meetings with the EM/PM/DevOps and issue management,
+   totalling 20% of the grand total.
+4. **Grand Total**, then effort in man-days, the actual AI cost, and a
+   **Who Would Have Done It** table breaking the same work down by role.
+
+Then add one or two plain-language sentences on the headline numbers: total
+cost and man-days of effort.
+
+Do not describe the numbers as a quote or an invoice — they are a heuristic
+estimate for order-of-magnitude framing. If the user asks how a figure was
+derived, the model is documented in the project README under "The cost model".
 
 ### Export
 
-Parse the format from the arguments: `pdf`, `png`, or `html` (default `html`).
+Parse the format from the arguments: `pdf`, `png`, `html`, or `md`
+(default `html`).
 
 ```bash
-realistic-cost export --format <pdf|png|html> [--out <path>]
+realistic-cost export --format <pdf|png|html|md> [--out <path>]
 ```
 
-- For `pdf`/`png`, the tool shells out to headless Chrome. If Chrome is not
-  installed it gracefully degrades to writing an HTML file and tells you the
-  path — relay that path and note to the user that installing Chrome enables
-  PDF/PNG.
-- After the export, tell the user the output file path.
+- `html` and `md` always work.
+- `pdf` and `png` shell out to headless Chrome. If no browser is found the
+  command writes HTML instead and says so — relay that path and mention that
+  installing Chrome enables PDF/PNG.
 
-3. Do not write any code yourself — this command only runs `realistic-cost`.
+Report the output file path when it finishes.
+
+## Notes
+
+- This command only runs `realistic-cost`. Do not write code or edit files.
+- If `realistic-cost` is not on PATH, tell the user to run the installer
+  (`./claude-code/install.sh`) rather than trying to fetch it at runtime.

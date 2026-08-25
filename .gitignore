@@ -22,3 +22,5 @@ Thumbs.db
 
 # Agent scratch
 .context/
+.serena/
+.claude/settings.local.json
