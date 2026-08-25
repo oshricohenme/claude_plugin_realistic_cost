@@ -11,19 +11,21 @@
   "types": "./dist/core/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
+      "default": "./dist/core/index.js"
     },
     "./core": {
+      "types": "./dist/core/index.d.ts",
       "import": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
+      "default": "./dist/core/index.js"
     }
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/bin/realistic-cost.ts",
-    "test": "node --test --import tsx test/smoke.test.ts test/estimate.test.ts test/cost.test.ts test/rates.test.ts test/transcript.test.ts test/cli.test.ts",
+    "test": "node --test --import tsx test/smoke.test.ts test/estimate.test.ts test/cost.test.ts test/rates.test.ts test/transcript.test.ts test/cli.test.ts test/parity.test.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "files": [

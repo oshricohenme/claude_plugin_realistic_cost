@@ -12,6 +12,7 @@ import type {
 } from "./types.js"
 import { ROLES, ROLE_ORDER } from "./roles.js"
 import { defaultRates, mergeRates } from "./rates.js"
+import { ESTIMATE_DEFAULTS } from "./estimate.js"
 
 // ---------------------------------------------------------------------------
 // Compute cost + calendar from stats + estimate
@@ -45,20 +46,11 @@ function resolveOptions(o?: CostOptions): CostOptionsInternal {
   return {
     hoursPerDay: o?.productiveHoursPerDay ?? DEFAULT_HOURS_PER_DAY,
     aiCost: o?.aiCost ?? 0,
+    // Single source of truth: these MUST be the same defaults estimateHours()
+    // uses, or the receipt and the role table are computed with different
+    // parameters. Re-declaring them here is how they drift.
     estimateOptions: {
-      reviewOverheadMultiplier: 0.35,
-      qaOverheadMultiplier: 0.5,
-      qaWithTestsMultiplier: 0.35,
-      designOverheadMultiplier: 0.6,
-      pmOverheadMultiplier: 0.15,
-      emOverheadMultiplier: 0.10,
-      devopsDeployMultiplier: 0.15,
-      securitySensitiveMultiplier: 0.15,
-      securityNormalMultiplier: 0.05,
-      techwriterOverheadMultiplier: 0.1,
-      discoverySearchHours: 0.25,
-      discoveryReadHours: 0.15,
-      discoveryThinkingHours: 0.1,
+      ...ESTIMATE_DEFAULTS,
       ...o?.estimateOptions,
     },
   }

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/oshricohenme/claude_plugin_realistic_cost/actions/workflows/ci.yml/badge.svg)](https://github.com/oshricohenme/claude_plugin_realistic_cost/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
+[![Node](https://img.shields.io/badge/node-%3E%3D20.6-brightgreen)](package.json)
 
 `realistic-cost` estimates the **fully-loaded cost and calendar effort** a
 senior human engineering team would have needed to produce the work done in an
@@ -87,7 +87,7 @@ Clones this repo, builds the CLI, and installs into Claude Code and/or
 
 ```bash
 git clone https://github.com/oshricohenme/claude_plugin_realistic_cost.git
-cd realistic-cost
+cd claude_plugin_realistic_cost
 ./setup.sh
 ```
 

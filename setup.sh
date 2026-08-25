@@ -18,12 +18,30 @@ c_cyan()  { printf '\033[36m%s\033[0m\n' "$*"; }
 c_red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
+# This script edits ~/.claude/settings.json and installs files into $HOME, so
+# it must never proceed on assumed answers. Piped into a shell (`curl | bash`)
+# there is no /dev/tty and every prompt would silently take its default —
+# installing everything unattended. Require a tty, or an explicit opt-in.
+ASSUME_YES="${REALISTIC_COST_ASSUME_YES:-0}"
+
+require_tty() {
+  [ "$ASSUME_YES" = "1" ] && return 0
+  if ! { exec 3</dev/tty; } 2>/dev/null; then
+    c_red "No interactive terminal available, and this installer modifies files in \$HOME."
+    c_dim "  Clone the repo and run ./setup.sh directly, or re-run with"
+    c_dim "  REALISTIC_COST_ASSUME_YES=1 to accept every prompt (installs both targets)."
+    exit 1
+  fi
+  exec 3<&-
+}
+
 confirm() {
   # confirm <prompt> [default(y|n)]
   local prompt="$1" default="${2:-y}" choice
   local hint
+  if [ "$ASSUME_YES" = "1" ]; then return 0; fi
   if [ "$default" = "y" ]; then hint="[Y/n]"; else hint="[y/N]"; fi
-  read -r -p "$(c_bold "$prompt") $hint " choice </dev/tty 2>/dev/null || choice=""
+  read -r -p "$(c_bold "$prompt") $hint " choice </dev/tty
   choice="${choice:-$default}"
   case "$choice" in
     y|Y|yes|YES) return 0 ;;
@@ -44,7 +62,8 @@ pick_target() {
   * opencode has no status-line bar; only the skill + CLI are installed there.
 MENU
   local sel
-  read -r -p "$(c_bold 'Choose [1-4]')" sel </dev/tty 2>/dev/null || sel="3"
+  if [ "$ASSUME_YES" = "1" ]; then echo "3"; return 0; fi
+  read -r -p "$(c_bold 'Choose [1-4]')" sel </dev/tty
   sel="${sel:-3}"
   echo "$sel"
 }
@@ -74,6 +93,9 @@ install_claude_code() {
   chmod +x "$CLAUDE_DIR/statusline.sh"
   cp "$REPO_DIR/claude-code/print-cost.sh" "$CLAUDE_DIR/print-cost.sh"
   chmod +x "$CLAUDE_DIR/print-cost.sh"
+  # rm first: `cp -R src dst` nests as dst/realistic-cost when dst exists,
+  # so a second run would create skills/realistic-cost/realistic-cost.
+  rm -rf "${CLAUDE_DIR:?}/skills/realistic-cost"
   cp -R "$REPO_DIR/claude-code/skills/realistic-cost" "$CLAUDE_DIR/skills/realistic-cost"
   c_green "  ✓ statusline.sh + print-cost.sh + skill installed"
 
@@ -82,13 +104,36 @@ install_claude_code() {
     cp "$REPO_DIR/claude-code/settings.example.json" "$settings"
     c_green "  ✓ created $settings"
   elif command -v node >/dev/null 2>&1; then
+    # Always take a fresh timestamped backup — settings.json holds the user's
+    # own hooks and status line, and a lossy edit here is unrecoverable.
+    local backup
+    backup="$settings.bak-realistic-cost-$(date +%Y%m%d%H%M%S)"
+    cp "$settings" "$backup"
+    c_dim "  · backed up $settings -> $(basename "$backup")"
+
     node -e '
       const fs = require("fs");
       const p = process.argv[1];
       const s = JSON.parse(fs.readFileSync(p, "utf8"));
-      s.statusLine = { type: "command", command: "~/.claude/statusline.sh", padding: 2 };
+      const STATUSLINE = "~/.claude/statusline.sh";
+      const HOOK = "~/.claude/print-cost.sh";
+      const notes = [];
+
+      // statusLine: only one can exist, so replacing it is the install. Report
+      // the displaced command instead of silently dropping it.
+      const prev = s.statusLine && s.statusLine.command;
+      if (prev && prev !== STATUSLINE) notes.push("replaced statusLine (was: " + prev + ")");
+      s.statusLine = { type: "command", command: STATUSLINE, padding: 2 };
+
+      // hooks.Stop: MERGE. Other tools register Stop hooks here; assigning the
+      // array destroys them.
       s.hooks = s.hooks || {};
-      s.hooks.Stop = [{ matcher: "", hooks: [{ type: "command", command: "~/.claude/print-cost.sh" }] }];
+      const stop = Array.isArray(s.hooks.Stop) ? s.hooks.Stop : [];
+      const has = stop.some((g) => (g && Array.isArray(g.hooks) ? g.hooks : []).some((h) => h && h.command === HOOK));
+      if (!has) stop.push({ matcher: "", hooks: [{ type: "command", command: HOOK }] });
+      s.hooks.Stop = stop;
+      if (stop.length > 1) notes.push("kept " + (stop.length - 1) + " existing Stop hook group(s)");
+
       s.permissions = s.permissions || {};
       s.permissions.allow = Array.from(new Set([
         ...(s.permissions.allow || []),
@@ -97,6 +142,7 @@ install_claude_code() {
         "Bash(~/.claude/print-cost.sh:*)",
       ]));
       fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+      for (const n of notes) console.log("  · " + n);
     ' "$settings"
     c_green "  ✓ updated $settings (statusLine + Stop hook + permissions)"
   else
@@ -111,6 +157,7 @@ install_opencode() {
 
   # Skill (slash command)
   mkdir -p "$OPENCODE_DIR/skills"
+  rm -rf "${OPENCODE_DIR:?}/skills/realistic-cost"   # see note in install_claude_code
   cp -R "$REPO_DIR/opencode/skills/realistic-cost" "$OPENCODE_DIR/skills/realistic-cost"
   c_green "  ✓ skill installed ($OPENCODE_DIR/skills/realistic-cost/SKILL.md)"
 
@@ -149,6 +196,8 @@ main() {
   c_bold "realistic-cost setup"
   c_dim  "repo: $REPO_DIR"
   echo
+
+  require_tty
 
   local sel
   sel="$(pick_target)"

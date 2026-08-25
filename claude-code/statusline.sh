@@ -11,6 +11,12 @@
 # Silently no-ops if the binary isn't installed (Claude Code tolerates empty
 # output, so the built-in footer still renders).
 
+# 0. Explicit dev override (set by ./dev.sh claude) — always wins, so a local
+#    working-tree build is never shadowed by a globally installed copy.
+if [ -n "${RC_DEV:-}" ]; then
+  exec $RC_DEV status
+fi
+
 # 1. Global install on PATH (preferred)
 if command -v realistic-cost >/dev/null 2>&1; then
   exec realistic-cost status
@@ -22,7 +28,7 @@ if [ -x "$HOME/.local/bin/realistic-cost" ]; then
 fi
 
 # 3. Repo-local dev build (when run from a clone of this repo)
-RC_DEV="${RC_DEV:-}"
+RC_DEV=""
 if [ -z "$RC_DEV" ] && [ -f "$PWD/node_modules/.bin/realistic-cost" ]; then
   RC_DEV="$PWD/node_modules/.bin/realistic-cost"
 fi

@@ -13,10 +13,22 @@ current session.
 The tool reads session metadata (tool-call counts, lines added/removed,
 duration, thinking turns) — **no source-code diffing**.
 
-The output is formatted as a **receipt**: direct work line items (Speccing &
-Research, Thinking, Code Comprehension, Coding, Design, Documentation) with a
-subtotal, then Coordination Tax (Peer Review, Management, QA, DevOps, Security)
-with its own subtotal and overhead percentage, and a bold Grand Total.
+The output is formatted as a **receipt** with three sections, each with its own
+subtotal:
+
+1. **Management Overhead** — Product Management, Engineering Management.
+2. **Value Creation** — Thinking, Code Comprehension, Coding, Design, Peer
+   Review, QA & Testing, DevOps & Infra, Security Review.
+3. **Coordination Tax** — meetings with the EM, PM and DevOps, plus issue
+   management. Its subtotal also shows what percentage of the grand total is
+   coordination overhead.
+
+A bold Grand Total closes the receipt, followed by the effort in man-days.
+
+Value Creation and Coordination Tax line items are omitted when they come out
+at zero, but Management Overhead is always billed — it stands for the planning
+that precedes the session — so a session that produced no code still shows a
+non-zero total.
 
 ## Steps
 

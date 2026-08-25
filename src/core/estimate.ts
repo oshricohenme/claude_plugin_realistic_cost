@@ -42,7 +42,7 @@ const DESIGN_ASSET_HOURS_EACH = 2
  * `opts()` merges user overrides over these by name, so a key mismatch
  * silently disables the option (regression-tested in test/estimate.test.ts).
  */
-const DEFAULTS: Required<EstimateOptions> = {
+export const ESTIMATE_DEFAULTS: Required<EstimateOptions> = {
   reviewOverheadMultiplier: 0.35,
   qaOverheadMultiplier: 0.5,
   qaWithTestsMultiplier: 0.35,
@@ -59,7 +59,7 @@ const DEFAULTS: Required<EstimateOptions> = {
 }
 
 function opts(o?: EstimateOptions): Required<EstimateOptions> {
-  return { ...DEFAULTS, ...o }
+  return { ...ESTIMATE_DEFAULTS, ...o }
 }
 
 const pct = (x: number): string => `${Math.round(x * 100)}%`

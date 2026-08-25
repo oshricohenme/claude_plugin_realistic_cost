@@ -59,7 +59,12 @@ fi
 
 # Forward the captured hook payload to the CLI; it reads the JSON, extracts
 # transcript_path, parses the transcript, and prints the status line.
-if [ -n "$RC_BIN" ]; then
+# RC_DEV (set by ./dev.sh claude) is an explicit dev override and wins over any
+# global copy. It may be a multi-word command ("node /path/x.js"), so it is
+# expanded unquoted on purpose.
+if [ -n "${RC_DEV:-}" ]; then
+  OUTPUT="$(printf '%s' "$INPUT" | $RC_DEV status 2>/dev/null)" || true
+elif [ -n "$RC_BIN" ]; then
   OUTPUT="$(printf '%s' "$INPUT" | "$RC_BIN" status 2>/dev/null)" || true
 else
   OUTPUT="$(printf '%s' "$INPUT" | npx --yes realistic-cost status 2>/dev/null)" || true

@@ -258,13 +258,49 @@ function buildReport(input: StatusLineInput, opts: CliOpts, useCache: boolean): 
 // Stdin reader
 // ---------------------------------------------------------------------------
 
+// `isTTY` is false whenever stdin is a pipe — including an *open pipe with no
+// writer*, which is how agent harnesses (and CI) commonly invoke a CLI. Waiting
+// on "end" there never returns, so `realistic-cost review` would hang forever.
+// Bound the wait: if nothing arrives promptly, treat it as "no piped input".
+const STDIN_IDLE_MS = Number(process.env.REALISTIC_COST_STDIN_TIMEOUT_MS ?? 250)
+
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return ""
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
-    process.stdin.on("data", (c: Buffer) => chunks.push(c))
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
-    process.stdin.on("error", () => resolve(""))
+    let settled = false
+
+    const finish = (value: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      process.stdin.removeListener("data", onData)
+      process.stdin.removeListener("end", onEnd)
+      process.stdin.removeListener("error", onError)
+      process.stdin.pause()
+      // pause() alone still leaves the handle referenced, so an open-but-idle
+      // pipe keeps the event loop alive and the process never exits. unref()
+      // exists on socket/pipe stdin but not when stdin is a plain file
+      // (`< /dev/null`, `< file`), where the loop is not held open anyway.
+      const stdin = process.stdin as NodeJS.ReadStream & { unref?: () => void }
+      if (typeof stdin.unref === "function") stdin.unref()
+      resolve(value)
+    }
+
+    const collected = () => Buffer.concat(chunks).toString("utf8")
+    // Re-armed on every chunk, so a slow writer is not cut off mid-stream.
+    let timer = setTimeout(() => finish(collected()), STDIN_IDLE_MS)
+    const onData = (c: Buffer) => {
+      chunks.push(c)
+      clearTimeout(timer)
+      timer = setTimeout(() => finish(collected()), STDIN_IDLE_MS)
+    }
+    const onEnd = () => finish(collected())
+    const onError = () => finish("")
+
+    process.stdin.on("data", onData)
+    process.stdin.on("end", onEnd)
+    process.stdin.on("error", onError)
   })
 }
 
@@ -306,8 +342,16 @@ export function createProgram(): Command {
       .option("--ai-cost <n>", "AI session cost in USD", num("ai-cost"))
       .option("--rates <path>", "path to rates JSON override")
       .option("--hours-per-day <n>", "productive hours per man-day (default 8)", num("hours-per-day", { min: 1 }))
-    for (const [flag, desc] of MODEL_FLAG_HELP.slice(0, 13)) {
-      cmd.option(flag, desc, num(flag.replace(/[ <-].*$/, "")))
+    for (const [flag, desc] of MODEL_FLAG_HELP) {
+      // --hours-per-day is registered above with its own min constraint.
+      // Skipping it by name (rather than by a magic slice index) means a new
+      // model flag appended to MODEL_FLAG_HELP is registered, not dropped.
+      if (flag.startsWith("--hours-per-day")) continue
+      // Strip the leading dashes first, then the ` <x>` placeholder. A single
+      // [ <-] class matches the leading "-" too, which emptied every label and
+      // produced errors reading "argument 'abc' is invalid.  must be a number".
+      const label = flag.replace(/^-+/, "").replace(/[\s<].*$/, "")
+      cmd.option(flag, desc, num(label))
     }
     return cmd
   }

@@ -136,7 +136,20 @@ function chromeHeadlessArgs(binary: string): string[] {
   const isEdge = /edge/i.test(binary)
   const isBrave = /brave/i.test(binary)
   const headless = isEdge || isBrave ? "--headless" : "--headless=new"
-  return [headless, "--disable-gpu", "--no-sandbox", "--hide-scrollbars"]
+  const args = [headless, "--disable-gpu", "--hide-scrollbars"]
+  // --no-sandbox disables Chrome's sandbox for every render, which is not
+  // something a local tool should do by default. It is only *needed* as root
+  // (containers, CI), where Chrome refuses to start otherwise.
+  if (isSandboxlessEnvironment()) args.push("--no-sandbox")
+  return args
+}
+
+/** True when Chrome cannot use its sandbox: running as root, or in a container. */
+function isSandboxlessEnvironment(): boolean {
+  if (process.env.REALISTIC_COST_NO_SANDBOX === "1") return true
+  if (process.platform === "win32") return false
+  const asRoot = typeof process.getuid === "function" && process.getuid() === 0
+  return asRoot || existsSync("/.dockerenv")
 }
 
 // Helper for callers that just want HTML bytes

@@ -272,6 +272,15 @@ function recordToolCall(stats: TranscriptStats, name: string, input: Record<stri
   }
 }
 
+// Edit/MultiEdit tool inputs use snake_case (`old_string`/`new_string`) in real
+// Claude Code transcripts. Older fixtures — and some third-party harnesses —
+// use camelCase. Read both, or every Edit contributes zero lines.
+function editStr(input: Record<string, unknown>, which: "old" | "new"): string {
+  const snake = which === "old" ? input.old_string : input.new_string
+  const camel = which === "old" ? input.oldString : input.newString
+  return String(snake ?? camel ?? "")
+}
+
 function buildWriteOp(
   tool: FileWriteOp["tool"],
   input: Record<string, unknown>,
@@ -285,19 +294,16 @@ function buildWriteOp(
     const content = String(input.content ?? "")
     linesAdded = lineCount(content)
   } else if (tool === "Edit") {
-    const oldStr = String(input.oldString ?? "")
-    const newStr = String(input.newString ?? "")
-    linesRemoved = lineCount(oldStr)
-    linesAdded = lineCount(newStr)
+    linesRemoved = lineCount(editStr(input, "old"))
+    linesAdded = lineCount(editStr(input, "new"))
   } else if (tool === "MultiEdit") {
-    // edits: array of {oldString, newString}
+    // edits: array of {old_string, new_string}
     const edits = Array.isArray(input.edits) ? input.edits : []
     for (const e of edits) {
       if (e && typeof e === "object") {
-        const o = String((e as Record<string, unknown>).oldString ?? "")
-        const n = String((e as Record<string, unknown>).newString ?? "")
-        linesRemoved += lineCount(o)
-        linesAdded += lineCount(n)
+        const edit = e as Record<string, unknown>
+        linesRemoved += lineCount(editStr(edit, "old"))
+        linesAdded += lineCount(editStr(edit, "new"))
       }
     }
   }

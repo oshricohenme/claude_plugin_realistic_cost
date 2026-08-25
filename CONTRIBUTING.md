@@ -4,15 +4,15 @@ Thanks for your interest in contributing!
 
 ## Requirements
 
-- **Node.js 20.6+** to develop (the test runner uses `node --import tsx`).
-  Node 18 is still fine to *run* the published CLI.
+- **Node.js 20.6+** — both to develop (the test runner uses `node --import tsx`)
+  and to run the published CLI. This matches `engines.node` in `package.json`.
 - npm (or a compatible package manager).
 
 ## Setup
 
 ```bash
 git clone https://github.com/oshricohenme/claude_plugin_realistic_cost.git
-cd realistic-cost
+cd claude_plugin_realistic_cost
 npm install
 npm run build
 ```
@@ -26,12 +26,27 @@ npm run typecheck  # strict tsc, no emit
 npm run build      # compile to dist/
 ```
 
-To iterate on the opencode TUI integration in a live session:
+To iterate on either harness integration in a live session:
 
 ```bash
-./dev.sh           # registers the plugin + skill, launches opencode
-./dev.sh --clean   # unregister + remove symlinks
+./dev.sh                  # Claude Code: statusline + Stop hook + skill, launch claude
+./dev.sh opencode         # opencode: register plugin + skill, launch opencode
+./dev.sh -- <args>        # forward extra args to the harness
+./dev.sh --clean          # unregister both targets
 ```
+
+Dev mode never copies files or edits your global config. Both targets build
+`dist/`, `npm link` the CLI, and point the harness at the working tree, so
+edits to `claude-code/*.sh`, the SKILL.md, or the opencode `.tsx` are live on
+the next launch (rebuild with `npm run build` after editing `src/`).
+
+`./dev.sh` (Claude Code) specifically differs from `claude-code/install.sh`: instead
+of writing to `~/.claude/settings.json`, it generates a throwaway settings file
+in `.dev/` and passes it via `claude --settings`, and symlinks the skill into
+this repo's `.claude/skills/` as a project-level skill. It also exports
+`RC_DEV` so the statusline and Stop hook use this working tree's build even if
+a published `realistic-cost` is installed globally. Your global Claude Code
+config is left untouched.
 
 ## The cost model
 

@@ -69,6 +69,12 @@ const RATES: Record<RoleId, number> = {
   fullstack: 112, qa: 90, devops: 130, security: 155, data: 120, techwriter: 80,
 }
 
+// Kept deliberately identical to src/core/cost.ts. This plugin cannot import
+// from src/ (opencode loads the .tsx standalone via bun), so parity is pinned
+// by test/parity.test.ts instead — change both sides together.
+const COORDINATION_TAX_SHARE = 0.2
+const COORDINATION_BUCKETS = 4
+
 const ROLE_TITLES: Record<RoleId, string> = {
   pm: "Product Manager", em: "Engineering Manager", designer: "Designer",
   backend: "Backend Engineer", frontend: "Frontend Engineer", fullstack: "Fullstack Engineer",
@@ -119,15 +125,26 @@ const BASE_RATE: Record<FileDomain, number> = { backend: 12, frontend: 15, fulls
 const DELETION_FACTOR = 0.3
 const MAX_MULT = 6.0
 const DESIGN_HOURS_EACH = 2
+const NEW_FILE_MULT = 1.5
+const LARGE_CHANGE_THRESHOLD = 100
+const LARGE_CHANGE_MULT = 1.3
 
 function estimateHours(stats: TranscriptStats): { roles: RoleEstimate[]; implementationHours: number } {
-  const byDomain: Record<FileDomain, { files: number; linesAdded: number; linesRemoved: number; hours: number }> = {} as any
+  const byDomain: Record<FileDomain, { files: number; linesAdded: number; weightedLinesAdded: number; linesRemoved: number; hours: number }> = {} as any
   for (const d of ["backend", "frontend", "fullstack", "docs", "config", "test", "design", "other"] as FileDomain[]) {
-    byDomain[d] = { files: 0, linesAdded: 0, linesRemoved: 0, hours: 0 }
+    byDomain[d] = { files: 0, linesAdded: 0, weightedLinesAdded: 0, linesRemoved: 0, hours: 0 }
   }
+  // Complexity weighting is PER WRITE, matching src/core/estimate.ts. Applying
+  // it to the domain average instead both missed the new-file factor and
+  // smeared one large write across every small edit in the same domain.
   for (const w of stats.fileWrites) {
     const b = byDomain[w.domain]
+    let mult = 1
+    if (w.tool === "Write") mult *= NEW_FILE_MULT
+    if (w.linesAdded > LARGE_CHANGE_THRESHOLD) mult *= LARGE_CHANGE_MULT
+    if (mult > MAX_MULT) mult = MAX_MULT
     b.files += 1; b.linesAdded += w.linesAdded; b.linesRemoved += w.linesRemoved
+    b.weightedLinesAdded += w.linesAdded * mult
   }
 
   for (const domain of Object.keys(byDomain) as FileDomain[]) {
@@ -135,10 +152,7 @@ function estimateHours(stats: TranscriptStats): { roles: RoleEstimate[]; impleme
     if (domain === "design") { b.hours = b.files * DESIGN_HOURS_EACH; continue }
     const base = BASE_RATE[domain] ?? BASE_RATE.other
     if (base <= 0) { b.hours = 0; continue }
-    let mult = 1
-    if (b.files > 0 && b.linesAdded / b.files > 100) mult *= 1.3
-    if (mult > MAX_MULT) mult = MAX_MULT
-    b.hours = (b.linesAdded / base) * mult + (b.linesRemoved / base) * DELETION_FACTOR
+    b.hours = b.weightedLinesAdded / base + (b.linesRemoved / base) * DELETION_FACTOR
   }
 
   const totalWriteLines = stats.fileWrites.reduce((s, w) => s + w.linesAdded + w.linesRemoved, 0)
@@ -183,7 +197,11 @@ function estimateHours(stats: TranscriptStats): { roles: RoleEstimate[]; impleme
   const DEVOPS_I = impl.devops, DOC = impl.techwriter
   const implHours = BE + FE + FS + DEVOPS_I + DOC + impl.qa
 
-  const qaMult = stats.toolCalls.write > 0 || impl.qa > 0 ? 0.35 : 0.5
+  // "Wrote tests" means test-domain files, not any Write at all. The old
+  // `toolCalls.write > 0` clause treated every session as tested, which is the
+  // bug CHANGELOG 0.2.0 records as fixed — in core only.
+  const wroteTests = impl.qa > 0
+  const qaMult = wroteTests ? 0.35 : 0.5
   const secMult = stats.touchesAuth || stats.touchesData || stats.touchesInfra ? 0.15 : 0.05
   const hasFEwork = FE + FS > 0
 
@@ -247,25 +265,32 @@ function computeActivities(stats: TranscriptStats, est: { roles: RoleEstimate[];
     { activity: "Security Review", hours: ohH("security"), cost: ohH("security") * RATES.security, section: "value" },
   ].filter(a => a.hours > 0.01 || a.cost > 0.01)
 
-  const X = valueActs.reduce((s, a) => s + a.cost, 0)
-  const T = X / 0.55
-
-  const pmCost = Math.max(3 * RATES.pm, 0.15 * T)
-  const pmHours = pmCost / RATES.pm
-  const emCost = Math.max(3 * RATES.em, 0.10 * T)
-  const emHours = emCost / RATES.em
-
-  const coordActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = [
-    { activity: "Meeting w/ Eng Manager", hours: blendedRate > 0 ? (0.05 * T) / blendedRate : 0, cost: 0.05 * T, section: "coordination" },
-    { activity: "Meeting w/ PM", hours: blendedRate > 0 ? (0.05 * T) / blendedRate : 0, cost: 0.05 * T, section: "coordination" },
-    { activity: "Meeting w/ DevOps", hours: blendedRate > 0 ? (0.05 * T) / blendedRate : 0, cost: 0.05 * T, section: "coordination" },
-    { activity: "Issue Management", hours: blendedRate > 0 ? (0.05 * T) / blendedRate : 0, cost: 0.05 * T, section: "coordination" },
-  ].filter(a => a.hours > 0.01 || a.cost > 0.01)
+  // Management — taken verbatim from the role estimate's PM and EM overhead
+  // hours, so the receipt and the roles table agree. This MUST match
+  // src/core/cost.ts: deriving pm/em from T instead priced the same session
+  // differently in the TUI than in the CLI.
+  const pmHours = ohH("pm")
+  const emHours = ohH("em")
+  const pmCost = pmHours * RATES.pm
+  const emCost = emHours * RATES.em
 
   const mgmtActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = [
     { activity: "Product Management", hours: pmHours, cost: pmCost, section: "management" },
     { activity: "Engineering Management", hours: emHours, cost: emCost, section: "management" },
   ]
+
+  // Coordination tax — COORDINATION_TAX_SHARE of the grand total, split evenly.
+  // T = X + pmCost + emCost + COORDINATION_TAX_SHARE * T.
+  const X = valueActs.reduce((s, a) => s + a.cost, 0)
+  const T = (X + pmCost + emCost) / (1 - COORDINATION_TAX_SHARE)
+  const bucketCost = (COORDINATION_TAX_SHARE * T) / COORDINATION_BUCKETS
+  const bucketHours = blendedRate > 0 ? bucketCost / blendedRate : 0
+  const coordActs: { activity: string; hours: number; cost: number; section: ActivitySection }[] = [
+    { activity: "Meeting w/ Eng Manager", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Meeting w/ PM", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Meeting w/ DevOps", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    { activity: "Issue Management", hours: bucketHours, cost: bucketCost, section: "coordination" },
+  ].filter(a => a.hours > 0.01 || a.cost > 0.01)
 
   const acts = [...mgmtActs, ...valueActs, ...coordActs]
     .filter(a => a.hours > 0.01 || a.cost > 0.01)
