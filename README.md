@@ -81,6 +81,7 @@ Works with **Claude Code** (status line, Stop hook, `/realistic-cost` skill) and
 - [The cost model](#the-cost-model)
 - [Limitations](#limitations)
 - [Development](#development)
+- [Author](#author)
 - [License](#license)
 
 ---
@@ -514,13 +515,27 @@ opencode/
 test/                              64 tests: model math, parsing, CLI, installer
 ```
 
-The opencode plugin **imports** `realistic-cost/core` rather than inlining a
+The opencode plugin **imports** `pre_ai_dev_cost_receipt/core` rather than inlining a
 copy, so both harnesses are guaranteed to produce the same number for the same
 session.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the model-change checklist,
 [CHANGELOG.md](CHANGELOG.md) for release history, and
 [SECURITY.md](SECURITY.md) for what the tool reads, writes, and executes.
+
+---
+
+## Author
+
+**Oshri Cohen**
+
+[oshricohen.me](https://oshricohen.me) ·
+[LinkedIn](https://www.linkedin.com/in/oshricohen) ·
+[GitHub](https://github.com/oshricohenme)
+
+Questions about the cost model, or think a rate is wrong for your market?
+[Open an issue](https://github.com/oshricohenme/claude_plugin_realistic_cost/issues)
+— the model is a heuristic and it improves on feedback.
 
 ---
 
