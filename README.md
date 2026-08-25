@@ -71,6 +71,7 @@ Works with **Claude Code** (status line, Stop hook, `/realistic-cost` skill) and
 ## Table of contents
 
 - [Requirements](#requirements)
+- [Install — Claude Code plugin marketplace](#install--claude-code-plugin-marketplace)
 - [Install — Claude Code](#install--claude-code)
 - [Install — opencode](#install--opencode)
 - [Install — CLI only](#install--cli-only)
@@ -97,8 +98,65 @@ Everything else is bundled. The tool makes no network requests.
 
 ---
 
+## Install — Claude Code plugin marketplace
+
+The repository is its own Claude Code plugin marketplace. Two commands, no
+clone:
+
+```
+/plugin marketplace add oshricohenme/claude_plugin_realistic_cost
+/plugin install realistic-cost@pre-ai-dev-cost-receipt
+```
+
+Then install the engine the plugin drives, once:
+
+```bash
+npm install -g pre_ai_dev_cost_receipt
+```
+
+You get the `/realistic-cost` skill and the Stop hook that prints the cost line
+every fifth assistant turn.
+
+> **The status line is not part of the plugin.** Claude Code plugins cannot
+> declare a `statusLine`, so the bottom-bar readout still has to be wired into
+> your own settings. Add this to `~/.claude/settings.json` — or run
+> [`./claude-code/install.sh`](#install--claude-code), which does it for you and
+> backs the file up first:
+>
+> ```json
+> {
+>   "statusLine": {
+>     "type": "command",
+>     "command": "~/.claude/statusline.sh",
+>     "padding": 2
+>   }
+> }
+> ```
+
+If the CLI is missing, the Stop hook says so once per session rather than
+failing silently. The status line and the hook deliberately never fall back to
+`npx`: both run on a hot path, and resolving a package from the registry there
+would be slow _and_ a supply-chain risk.
+
+<details>
+<summary><b>What the plugin registers</b></summary>
+
+| Manifest                          | Registers                                     |
+| --------------------------------- | --------------------------------------------- |
+| `.claude-plugin/marketplace.json` | the `pre-ai-dev-cost-receipt` marketplace     |
+| `.claude-plugin/plugin.json`      | the `realistic-cost` plugin (v0.4.0, MIT)     |
+| `claude-code/skills/`             | the `/realistic-cost` skill                   |
+| `claude-code/hooks/hooks.json`    | the `Stop` hook → `claude-code/print-cost.sh` |
+
+It writes nothing to `~/.claude/settings.json` and adds no permission entries.
+
+</details>
+
+---
+
 ## Install — Claude Code
 
+The scripted install, for the full experience **including the status line**.
 Adds a live status line, a `/realistic-cost` slash command, and a Stop hook that
 prints the cost summary every fifth assistant turn.
 
@@ -202,7 +260,7 @@ cp -R opencode/skills/realistic-cost ~/.config/opencode/skills/
 ## Install — CLI only
 
 ```bash
-npm install -g realistic-cost
+npm install -g pre_ai_dev_cost_receipt
 realistic-cost review
 ```
 
@@ -328,7 +386,7 @@ The same knobs are available programmatically via `EstimateOptions` /
 ### Programmatic use
 
 ```ts
-import { parseTranscript, estimateHours, computeCost, formatMarkdown } from "realistic-cost/core"
+import { parseTranscript, estimateHours, computeCost, formatMarkdown } from "pre_ai_dev_cost_receipt/core"
 
 const stats = parseTranscript("/path/to/session.jsonl")
 const report = computeCost({ stats, estimate: estimateHours(stats) })

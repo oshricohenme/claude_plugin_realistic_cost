@@ -17,7 +17,7 @@ import {
   type ActivityCost,
   type CostReport,
   type TranscriptStats,
-} from "realistic-cost/core"
+} from "pre_ai_dev_cost_receipt/core"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SESSION BRIDGE — opencode state → TranscriptStats
