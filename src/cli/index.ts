@@ -9,6 +9,7 @@ import {
   estimateHours,
   parseStatusLineStdin,
   parseTranscript,
+  transcriptSignature,
   emptyStats,
   formatStatusLine,
   type CostReport,
@@ -131,13 +132,17 @@ function newestJsonl(dirs: string[]): string {
 // ---------------------------------------------------------------------------
 // Statusline parse cache — the status line re-runs on every UI refresh, and
 // re-parsing a multi-MB transcript JSONL each time is wasteful. Cache parsed
-// stats keyed by path, invalidated by mtime+size. Best-effort: any cache
-// error falls back to a full parse.
+// stats keyed by path, invalidated by a signature over every file the parse
+// reads. Best-effort: any cache error falls back to a full parse.
 // ---------------------------------------------------------------------------
 
 interface CacheEntry {
-  mtimeMs: number
-  size: number
+  /**
+   * mtime+size across the parent transcript AND its subagent sidecars. Keying
+   * on the parent alone would serve stale stats for the minutes a subagent
+   * runs, during which only the sidecar file grows.
+   */
+  signature: string
   stats: TranscriptStats
 }
 
@@ -160,10 +165,10 @@ function cachePathFor(transcript: string): string {
   return join(cacheDir(), `cache-${key}.json`)
 }
 
-function readCachedStats(transcript: string, mtimeMs: number, size: number): TranscriptStats | null {
+function readCachedStats(transcript: string, signature: string): TranscriptStats | null {
   try {
     const entry = JSON.parse(readFileSync(cachePathFor(transcript), "utf8")) as CacheEntry
-    if (entry.mtimeMs === mtimeMs && entry.size === size && entry.stats) {
+    if (entry.signature === signature && entry.stats) {
       return structuredClone(entry.stats)
     }
   } catch {
@@ -172,9 +177,9 @@ function readCachedStats(transcript: string, mtimeMs: number, size: number): Tra
   return null
 }
 
-function writeCachedStats(transcript: string, mtimeMs: number, size: number, stats: TranscriptStats): void {
+function writeCachedStats(transcript: string, signature: string, stats: TranscriptStats): void {
   try {
-    const entry: CacheEntry = { mtimeMs, size, stats }
+    const entry: CacheEntry = { signature, stats }
     writeFileSync(cachePathFor(transcript), JSON.stringify(entry), { mode: 0o600 })
   } catch {
     // cache write failures are non-fatal
@@ -183,11 +188,11 @@ function writeCachedStats(transcript: string, mtimeMs: number, size: number, sta
 
 function parseTranscriptCached(transcript: string): TranscriptStats {
   try {
-    const st = statSync(transcript)
-    const cached = readCachedStats(transcript, st.mtimeMs, st.size)
+    const signature = transcriptSignature(transcript)
+    const cached = readCachedStats(transcript, signature)
     if (cached) return cached
     const stats = parseTranscript(transcript)
-    writeCachedStats(transcript, st.mtimeMs, st.size, stats)
+    writeCachedStats(transcript, signature, stats)
     return stats
   } catch {
     return parseTranscript(transcript)
@@ -372,14 +377,74 @@ export const MODEL_FLAGS: ReadonlyArray<{
     desc: "USD per reasoning token billed as design time (default 0.05)",
   },
   {
+    flag: "--tool-call-work-hours <x>",
+    key: "toolCallWorkHours",
+    desc: "hours of work time per tool call (default 0.5)",
+  },
+  {
+    flag: "--tool-call-coordination-hours <x>",
+    key: "toolCallCoordinationHours",
+    desc: "hours of email/meeting time per tool call (default 0.5)",
+  },
+  {
+    flag: "--web-request-min-hours <x>",
+    key: "webRequestMinHours",
+    desc: "lower bound on time spent reading one fetched page (default 0.5)",
+  },
+  {
+    flag: "--web-request-max-hours <x>",
+    key: "webRequestMaxHours",
+    desc: "upper bound on time spent reading one fetched page (default 1.0)",
+  },
+  {
     flag: "--discovery-search-hours <x>",
     key: "discoverySearchHours",
-    desc: "hours per glob+grep call (default 0.25)",
+    desc: "code-comprehension hours per glob/grep call (default 0.25)",
   },
   {
     flag: "--discovery-read-hours <x>",
     key: "discoveryReadHours",
-    desc: "hours per file read (default 0.15)",
+    desc: "code-comprehension hours per file read (default 0.15)",
+  },
+  {
+    flag: "--mcp-coordination-hours <x>",
+    key: "mcpCallCoordinationHours",
+    desc: "extra cross-team coordination per MCP call (default 1.0)",
+  },
+  {
+    flag: "--mcp-management-hours <x>",
+    key: "mcpServerManagementHours",
+    desc: "management hours per MCP server engaged (default 4)",
+  },
+  {
+    flag: "--mcp-engineering-hours <x>",
+    key: "mcpServerEngineeringHours",
+    desc: "engineer meeting hours per MCP server (default 4)",
+  },
+  {
+    flag: "--mcp-coordination-factor <x>",
+    key: "mcpCallCoordinationFactor",
+    desc: "multiplier on email/meeting time for MCP calls (default 2)",
+  },
+  {
+    flag: "--mcp-dept-work-min-hours <x>",
+    key: "mcpCallDepartmentMinHours",
+    desc: "lower bound on the other department's work per MCP call (default 2)",
+  },
+  {
+    flag: "--mcp-dept-work-max-hours <x>",
+    key: "mcpCallDepartmentMaxHours",
+    desc: "upper bound on the other department's work per MCP call (default 5)",
+  },
+  {
+    flag: "--subagent-coordination-hours <x>",
+    key: "subagentCoordinationHours",
+    desc: "coordination hours per subagent team (default 2)",
+  },
+  {
+    flag: "--subagent-management-hours <x>",
+    key: "subagentManagementHours",
+    desc: "EM hours per subagent team (default 4)",
   },
   {
     flag: "--discovery-thinking-hours <x>",

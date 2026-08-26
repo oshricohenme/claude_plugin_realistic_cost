@@ -156,8 +156,11 @@ export function renderTerminal(report: CostReport): string {
 
   // Metadata
   const s = report.stats
+  const subagents = s.subagents > 0 ? `  ${kleur.gray("Subagents:")} ${s.subagents}` : ""
+  const mcp =
+    s.mcpCalls > 0 ? `  ${kleur.gray("MCP:")} ${s.mcpCalls} calls / ${s.mcpServers.length} servers` : ""
   L.push(
-    `  ${kleur.gray("Lines:")} +${report.aiLinesAdded} / -${report.aiLinesRemoved}  ${kleur.gray("Tools:")} ${s.toolCalls.total}  ${kleur.gray("Thinking:")} ${s.thinkingTurns}`,
+    `  ${kleur.gray("Lines:")} +${report.aiLinesAdded} / -${report.aiLinesRemoved}  ${kleur.gray("Tools:")} ${s.toolCalls.total}  ${kleur.gray("Thinking:")} ${s.thinkingTurns}${subagents}${mcp}`,
   )
   if (s.touchesAuth || s.touchesData || s.touchesInfra) {
     const flags: string[] = []

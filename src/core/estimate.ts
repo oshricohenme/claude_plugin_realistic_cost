@@ -59,9 +59,83 @@ export const ESTIMATE_DEFAULTS: Required<EstimateOptions> = {
   securityNormalMultiplier: 0.05,
   techwriterOverheadMultiplier: 0.1,
   thinkingCostPerToken: 0.05,
+  toolCallWorkHours: 0.5,
+  toolCallCoordinationHours: 0.5,
+  webRequestMinHours: 0.5,
+  webRequestMaxHours: 1,
   discoverySearchHours: 0.25,
   discoveryReadHours: 0.15,
+  mcpCallCoordinationHours: 1,
+  mcpServerManagementHours: 4,
+  mcpServerEngineeringHours: 4,
+  mcpCallCoordinationFactor: 2,
+  mcpCallDepartmentMinHours: 2,
+  mcpCallDepartmentMaxHours: 5,
+  subagentCoordinationHours: 2,
+  subagentManagementHours: 4,
   discoveryThinkingHours: 0.1,
+}
+
+// ---------------------------------------------------------------------------
+// Web-request read time
+// ---------------------------------------------------------------------------
+
+/**
+ * Reading a fetched page takes longer than reading a local file, and how much
+ * longer depends on the page — so a web request costs a VARYING
+ * [webRequestMinHours, webRequestMaxHours] rather than a flat rate.
+ *
+ * The variation is deterministic on purpose. `Math.random()` here would be a
+ * defect, not a feature: the status line re-renders on every keystroke and
+ * `review` is run repeatedly on the same session, so a genuinely random draw
+ * would quote a different total every time for work that had not changed.
+ * Seeding from the transcript path instead gives per-call variation that is
+ * stable for a given session and differs between sessions.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** FNV-1a — a small, stable string hash. Any stable seed would do. */
+function hashString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/**
+ * `count` draws from [min, max], summed. Deterministic for a given seed — see
+ * the note above on why this must not be `Math.random()`.
+ *
+ * Callers pass distinct seeds for distinct kinds of work, so web requests and
+ * MCP calls in the same session do not replay the identical sequence.
+ */
+export function variableHours(count: number, min: number, max: number, seed: string): number {
+  if (count <= 0) return 0
+  const lo = Math.min(min, max)
+  const hi = Math.max(min, max)
+  if (hi === lo) return count * lo
+  const rand = mulberry32(hashString(seed))
+  let hours = 0
+  for (let i = 0; i < count; i++) hours += lo + rand() * (hi - lo)
+  return hours
+}
+
+export function webRequestHours(
+  count: number,
+  o: Pick<Required<EstimateOptions>, "webRequestMinHours" | "webRequestMaxHours">,
+  seed: string,
+): number {
+  return variableHours(count, o.webRequestMinHours, o.webRequestMaxHours, seed + ":web")
 }
 
 /** Merge user overrides over the model defaults. */
@@ -198,28 +272,71 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
   // "other" domain: allocate to backend (most common fallback).
   impl.backend += domainBreakdown.other.hours
 
-  // Engineers spend significant time reading code to understand context.
-  // Split read/search time: 50% → engineer code comprehension (implementation),
-  // 50% → PM/EM/Designer discovery (management overhead).
+  // Every tool call stands in for a half-hour of human work — opening a file,
+  // running a command, making an edit — except a web request, which costs a
+  // varying 0.5-1.0h because reading a page is slower than reading a file.
+  const webCalls = Math.min(stats.toolCalls.web, stats.toolCalls.total)
+  const otherCalls = Math.max(0, stats.toolCalls.total - webCalls)
+  const toolWorkHours = otherCalls * o.toolCallWorkHours + webRequestHours(webCalls, o, stats.transcriptPath)
+  // ...and drags along its own half-hour of email and meetings, billed
+  // separately in cost.ts so it is visible rather than buried in impl.
+  // Email/meeting time per call, at a multiple for MCP calls: corresponding
+  // with another department costs more than corresponding with yourself.
+  const mcpCallCount = Math.min(stats.mcpCalls ?? 0, stats.toolCalls.total)
+  const localCallCount = Math.max(0, stats.toolCalls.total - mcpCallCount)
+  const toolCoordinationHours =
+    localCallCount * o.toolCallCoordinationHours +
+    mcpCallCount * o.toolCallCoordinationHours * o.mcpCallCoordinationFactor
+
+  // Comprehension is charged SEPARATELY from tool operation, and on purpose:
+  // understanding a file and the act of pulling it up are different costs, so
+  // a read bills its comprehension time on top of its half-hour of tool work.
   const searchReadHours =
     (stats.toolCalls.glob + stats.toolCalls.grep) * o.discoverySearchHours +
     stats.toolCalls.read * o.discoveryReadHours
-  const thinkingHours = stats.thinkingTurns * o.discoveryThinkingHours
   const engineerReadHours = searchReadHours * 0.5
-  const discoveryHours = searchReadHours * 0.5 + thinkingHours
+  const discoveryHours = searchReadHours * 0.5 + stats.thinkingTurns * o.discoveryThinkingHours
 
-  // Add engineer read time to the dominant engineering domain.
+  // Cross-team overhead. An MCP call is a request to another department's
+  // system and a subagent is another team outright, so both cost more than the
+  // same work done in-house: coordination per interaction, and management once
+  // per team you had to involve at all.
+  // Defensive reads: stats can arrive from the status-line cache on disk,
+  // which may have been written by an older version that had no cross-team
+  // fields at all. A missing field must price as zero, not throw.
+  const mcpCalls = stats.mcpCalls ?? 0
+  const mcpServerCount = stats.mcpServers?.length ?? 0
+  const subagentCount = stats.subagents ?? 0
+  const mcpCoordinationHours = mcpCalls * o.mcpCallCoordinationHours
+  const subagentCoordinationHours = subagentCount * o.subagentCoordinationHours
+  const mcpManagementHours = mcpServerCount * o.mcpServerManagementHours
+  const subagentManagementHours = subagentCount * o.subagentManagementHours
+  // The dev is in those cross-department meetings too. Non-value-generating,
+  // so it is engineering OVERHEAD and is deliberately kept out of implHours —
+  // otherwise it would inflate every multiplier that scales off implementation.
+  const mcpEngineeringHours = mcpServerCount * o.mcpServerEngineeringHours
+  // An MCP call is a request another team's system does real work to satisfy.
+  // That work would have been someone's day job, so it is billed as such.
+  const mcpDepartmentWorkHours = variableHours(
+    mcpCalls,
+    o.mcpCallDepartmentMinHours,
+    o.mcpCallDepartmentMaxHours,
+    stats.transcriptPath + ":mcp",
+  )
+
+  // Tool work and comprehension both land on the dominant engineering domain.
+  const engineerHours = toolWorkHours + engineerReadHours
   if (hasBackend && hasFrontend) {
-    impl.backend += engineerReadHours * 0.5
-    impl.frontend += engineerReadHours * 0.5
+    impl.backend += engineerHours * 0.5
+    impl.frontend += engineerHours * 0.5
   } else if (hasBackend) {
-    impl.backend += engineerReadHours
+    impl.backend += engineerHours
   } else if (hasFrontend) {
-    impl.frontend += engineerReadHours
+    impl.frontend += engineerHours
   } else if (impl.fullstack > 0) {
-    impl.fullstack += engineerReadHours
+    impl.fullstack += engineerHours
   } else {
-    impl.backend += engineerReadHours
+    impl.backend += engineerHours
   }
 
   const BE = impl.backend
@@ -241,6 +358,35 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
   const securityMult = sensitive ? o.securitySensitiveMultiplier : o.securityNormalMultiplier
   const hasFrontendWork = FE + FS > 0
 
+  const departments = mcpServerCount > 0 ? `${mcpServerCount} MCP department(s)` : ""
+
+  /**
+   * Cross-department meeting time, spread over whichever engineering roles
+   * actually worked. Overhead, never implementation: it produces nothing, and
+   * folding it into implHours would silently inflate the PM, EM, QA, security
+   * and tech-writer multipliers that all scale off implementation hours.
+   */
+  const engMeeting: Record<"backend" | "frontend" | "fullstack", number> = {
+    backend: 0,
+    frontend: 0,
+    fullstack: 0,
+  }
+  if (mcpEngineeringHours > 0) {
+    if (hasBackend && hasFrontend) {
+      engMeeting.backend = mcpEngineeringHours * 0.5
+      engMeeting.frontend = mcpEngineeringHours * 0.5
+    } else if (hasBackend) {
+      engMeeting.backend = mcpEngineeringHours
+    } else if (hasFrontend) {
+      engMeeting.frontend = mcpEngineeringHours
+    } else if (impl.fullstack > 0) {
+      engMeeting.fullstack = mcpEngineeringHours
+    } else {
+      engMeeting.backend = mcpEngineeringHours
+    }
+  }
+  const meetingNote = (h: number) => (h > 0 ? ` + ${h.toFixed(1)}h cross-dept meetings` : "")
+
   const roles: RoleEstimate[] = []
   const push = (role: RoleId, implementationHours: number, overheadHours: number, note: string) => {
     roles.push({
@@ -261,8 +407,9 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
         push(
           "backend",
           BE,
-          review,
-          `Implementation ${BE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`,
+          review + engMeeting.backend,
+          `Implementation ${BE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}` +
+            meetingNote(engMeeting.backend),
         )
         break
       }
@@ -271,8 +418,9 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
         push(
           "frontend",
           FE,
-          review,
-          `Implementation ${FE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`,
+          review + engMeeting.frontend,
+          `Implementation ${FE.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}` +
+            meetingNote(engMeeting.frontend),
         )
         break
       }
@@ -281,7 +429,7 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
         const note = splitFullstack
           ? `Split 50/50 into backend/frontend (both stacks present)`
           : `Implementation ${FS.toFixed(1)}h + peer review ${pct(o.reviewOverheadMultiplier)}`
-        push("fullstack", FS, review, note)
+        push("fullstack", FS, review + engMeeting.fullstack, note + meetingNote(engMeeting.fullstack))
         break
       }
       case "devops": {
@@ -317,13 +465,23 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
         break
       }
       case "pm": {
-        const pmHours = Math.max(3, o.pmOverheadMultiplier * implHours)
-        push("pm", 0, pmHours, `${pct(o.pmOverheadMultiplier)} of impl (min 3h baseline)`)
+        // Half the per-department alignment cost; the EM carries the other half.
+        const crossTeam = mcpManagementHours * 0.5
+        const pmHours = Math.max(3, o.pmOverheadMultiplier * implHours) + crossTeam
+        const note = `${pct(o.pmOverheadMultiplier)} of impl (min 3h baseline)`
+        push("pm", 0, pmHours, crossTeam > 0 ? `${note} + ${departments} alignment` : note)
         break
       }
       case "em": {
-        const emHours = Math.max(3, o.emOverheadMultiplier * implHours)
-        push("em", 0, emHours, `${pct(o.emOverheadMultiplier)} of impl (min 3h baseline)`)
+        // Subagent management is the EM's alone: running work across N teams is
+        // N times the standups, the chasing and the integration risk.
+        const crossTeam = mcpManagementHours * 0.5 + subagentManagementHours
+        const emHours = Math.max(3, o.emOverheadMultiplier * implHours) + crossTeam
+        const note = `${pct(o.emOverheadMultiplier)} of impl (min 3h baseline)`
+        const extras = [subagentCount > 0 ? `${subagentCount} subagent team(s)` : "", departments].filter(
+          Boolean,
+        )
+        push("em", 0, emHours, extras.length > 0 ? `${note} + ${extras.join(" + ")}` : note)
         break
       }
       case "qa": {
@@ -370,6 +528,14 @@ export function estimateHours(stats: TranscriptStats, options?: EstimateOptions)
     roles,
     implementationHours: implHours,
     discoveryHours,
+    toolWorkHours,
+    comprehensionHours: engineerReadHours,
+    mcpEngineeringHours,
+    mcpEngineeringHoursByRole: { ...engMeeting },
+    mcpDepartmentWorkHours,
+    toolCoordinationHours,
+    mcpCoordinationHours,
+    subagentCoordinationHours,
     totalProductiveHours,
     domainBreakdown,
   }

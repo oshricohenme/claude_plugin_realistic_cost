@@ -7,6 +7,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One installer, `install.sh`, interactive, for both harnesses.** It detects
+  what is on the machine, shows it, asks which harness to set up, and confirms
+  every step. It works from a clone _and_ from a bare `curl | bash` — the same
+  script, deciding by whether it is sitting in a checkout — so opencode no
+  longer needs a clone. `setup.sh` forwards to it, and the flags are unchanged.
+
+  ```
+  curl -fsSL https://raw.githubusercontent.com/oshricohenme/claude_plugin_realistic_cost/main/install.sh | bash
+  ```
+
+  Colour degrades automatically when stdout is not a terminal, when the
+  terminal reports fewer than 8 colours, and under `NO_COLOR`. `PREFIX`,
+  `BIN_DIR`, `CLAUDE_DIR`, `OPENCODE_DIR` and `VERSION` are all overridable.
+  The CLI is symlinked into `~/.local/bin` rather than installed globally, so
+  it needs no sudo — and `statusline.sh` already looks there.
+
+- **Fixed while building it: an empty stdin was treated as consent.** With no
+  answer available, `read` fails, and the old code turned that into "took the
+  default" — so `./setup.sh </dev/null` performed a full install, replacing an
+  existing Claude Code `statusLine` without anyone confirming. A failed read is
+  now an error naming the non-interactive flags; an empty but _successful_ read
+  is still a real Enter keypress and still takes the default.
+
+- **Fixed: the plugin dependency install could hang forever.** `bun install` in
+  `opencode/` spins on the `file:..` self-reference when a previous run left
+  its self-link behind. The installer now clears that tree first and bounds the
+  install to three minutes, falling back to npm with an explanation rather than
+  hanging.
+
+- ~~`install-opencode.sh`~~ was folded into `install.sh` before release. It
+  fetched the npm package — which already ships the built engine, the TUI
+  plugin and the skill — installs the plugin's dependencies, copies the skill
+  and registers the plugin:
+
+  ```
+  curl -fsSL https://raw.githubusercontent.com/oshricohenme/claude_plugin_realistic_cost/main/install-opencode.sh | bash
+  ```
+
+  It writes only to `~/.local/share/realistic-cost` and `~/.config/opencode`,
+  is idempotent (re-running upgrades in place), honours `PREFIX`,
+  `OPENCODE_DIR` and `VERSION`, and prefers `bun` — checking `~/.bun/bin/bun`
+  as well as `PATH`, since bun is often installed without being on it —
+  falling back to `npm`. The clone + `setup.sh` route still works and remains
+  the one to use when developing on the plugin.
+
+### Added — cross-team overhead
+
+- **MCP calls and subagents are now priced as other teams.** Both represent
+  work leaving your own team, and the model now charges for that:
+
+  |                    | Coordination                                  | Management      | Other                                       |
+  | ------------------ | --------------------------------------------- | --------------- | ------------------------------------------- |
+  | per MCP call       | 1.0h sync, **and 2x the per-call email rate** | —               | **2–5h of the other department's own work** |
+  | per MCP **server** | —                                             | 4h, split PM/EM | **4h of engineer meeting time**             |
+  | per subagent       | 2.0h                                          | 4h, EM only     | —                                           |
+
+  An MCP call is not a library function: it is a request that another team's
+  system does real work to satisfy, and that work would have been someone's day
+  job — so it is billed as **Other Dept Work (MCP)**, a varying 2–5h per call
+  drawn from the same deterministic generator the web-request range uses, with
+  a separate seed so the two do not replay the same sequence. It is billed at
+  the session's blended engineering rate, since the model has no idea what that
+  department actually charges.
+
+  Engineer meeting time is billed as engineering **overhead**, never
+  implementation: it produces nothing, and folding it into implementation hours
+  would have quietly inflated every PM, EM, QA, security and tech-writer
+  multiplier that scales off implementation.
+
+  Management is charged per _department_, not per request: fifty calls to one
+  MCP server cost the same alignment as one, because the expensive part is
+  bringing that team in at all. Subagent management goes to the EM alone —
+  running work across N teams is N times the standups and the integration risk.
+  Coordination appears as **Cross-Team Sync (MCP)** and **Subagent Team
+  Coordination** line items; management flows through the PM and EM roles, so
+  the roles table and the receipt still agree.
+
+  On a real transcript, 157 MCP calls across 2 servers add $66,023 of other-
+  department work, $31,882 of email time, $18,539 of cross-department sync and
+  $945 of engineer meeting time — of a $229,401 bill. On a 40-subagent session,
+  the EM goes from 134h to 295.5h.
+
+- **MCP detection differs by harness, deliberately.** Claude Code's
+  `mcp__<server>__<tool>` is unambiguous. opencode flattens MCP tools to
+  `<server>_<tool>`, which looks identical to a plugin tool like `pty_spawn`,
+  so the opencode plugin passes `api.state.mcp()`'s configured server list and
+  a flattened name only counts when it matches one. Given no list, such calls
+  are left uncounted rather than guessed at — over-counting departments would
+  inflate the bill on every plugin tool.
+
+- MCP tagging is a _tag_, not a bucket: an MCP web search is still billed at web
+  read time for work, and additionally as a cross-department call. Subagents'
+  own MCP calls count toward the session's departments.
+
+- New flags: `--mcp-coordination-hours`, `--mcp-coordination-factor`,
+  `--mcp-dept-work-min-hours`, `--mcp-dept-work-max-hours`,
+  `--mcp-management-hours`, `--mcp-engineering-hours`,
+  `--subagent-coordination-hours`, `--subagent-management-hours`.
+
+### Fixed
+
+- **Documentation work was billed at zero.** The Technical Writer's hours
+  showed in the roles table but had no line item in the receipt at all, and the
+  receipt is what produces the grand total — so a session that wrote 300 lines
+  of docs was under-billed by the writer's entire cost. `Coding` and
+  `Peer Review` cover BE/FE/FS/devops/data/qa only, and nothing picked up the
+  writer. Added a **Documentation** line matching the role exactly.
+
+  Found while documenting the receipt line-by-line for the README. The
+  regression test that would have caught it now exists: value + management line
+  items must equal the sum of all role costs, on every domain mix.
+
+- **The engineer's cross-department meeting hours were priced twice at
+  different rates** — at the blended rate in the receipt and at the engineering
+  roles' own rates in the roles table. `EstimateResult` now carries the
+  per-role split so both use the role rates.
+
+- **Stats cached by an older version no longer crash the estimator.** The
+  status line caches parsed stats as JSON on disk; an entry written before the
+  cross-team fields existed used to throw on `stats.mcpServers.length`. Missing
+  fields now price as zero.
+
+### Changed — BREAKING (cost model)
+
+- **Every tool call now bills a flat hour: 0.5h of work plus 0.5h of email and
+  meeting time** — a read, a grep, a bash call and an edit are all worth the
+  same half hour of operating a tool.
+
+  This is charged **in addition to** code comprehension, which is unchanged
+  (0.25h per glob/grep, 0.15h per read, half billed to the engineer as the
+  **Code Comprehension** line). Operating a tool and understanding what it
+  returned are treated as different costs, so a single read bills 0.5h of tool
+  work plus its comprehension time.
+
+  - The work half is folded into the engineering roles' implementation hours
+    and shown as **Tool Work** (replacing the old _Code Comprehension_ line).
+  - The email half is a new **Emails & Follow-ups** line in the coordination
+    section, billed **on top of** the flat 20% coordination tax rather than
+    inside it — the tax is the standing cost of being on a team, this is the
+    correspondence a specific piece of work generates. Coordination therefore
+    now runs above 20% of the bill (~33% on a tool-heavy session).
+
+- **A web request costs 0.5–1h instead of the flat 0.5h**, because reading a
+  fetched page takes longer than reading a local file. `WebFetch`/`WebSearch`
+  and their opencode and plugin-prefixed equivalents get their own `web`
+  tool-call bucket, matched by substring so `mcp__x__webfetch` counts too.
+
+  The variation is **deterministic, not random** — seeded from the transcript
+  path. `Math.random()` here would be a defect rather than a feature: the
+  status line re-renders constantly and `review` gets run repeatedly on the
+  same session, so a true random draw would quote a different total every time
+  for work that had not changed. Each call still draws its own read time, and
+  different sessions draw differently; a given session always prices the same.
+
+  Effect on a real 40-subagent Claude Code session: $154,571 → $481,583
+  (1,345h → 4,192h), of which $76,434 is the new itemized email time.
+
+- Added `--tool-call-work-hours`, `--tool-call-coordination-hours`,
+  `--web-request-min-hours` and `--web-request-max-hours`.
+  `--discovery-search-hours`, `--discovery-read-hours` and
+  `--discovery-thinking-hours` are unchanged.
+
+### Fixed
+
+- **The opencode typecheck was checking the wrong code.** Its tsconfig mapped
+  `realistic-cost/core` — a package name from before the npm rename — so the
+  plugin's `pre_ai_dev_cost_receipt/core` imports resolved to the built `dist/`
+  instead of `src/`. The config exists precisely to stop the plugin drifting
+  from the engine, and it had been checking a stale artifact. Same story at
+  runtime: `npm test` now builds first, so the opencode tests exercise current
+  code rather than whatever `dist/` last held.
+
+### Fixed
+
+- **Subagent work is now counted, on both harnesses.** A session that delegated
+  to subagents was priced as if the delegated work never happened. Measured on
+  real sessions, against the same worktree:
+
+  | Session                   | Human bill before       | after                     |           |
+  | ------------------------- | ----------------------- | ------------------------- | --------- |
+  | Claude Code, 40 subagents | $16,241 · 19.1 man-days | $154,571 · 168.1 man-days | **9.5×**  |
+  | opencode, 21 subagents    | $42,406 · 46.2 man-days | $78,291 · 85.1 man-days   | **1.85×** |
+
+  The Claude Code multiple is larger because its transcript is the only record
+  of the work: the parse saw 186 tool calls and 12 file writes where the session
+  actually made 1,374 and 136. On opencode the delegated _lines_ already
+  arrived through the parent's worktree diff, so only the delegated effort —
+  1,075 tool calls and 450 reasoning turns — was missing.
+
+  - **Claude Code:** sidechain turns are no longer skipped, and subagent sidecar
+    transcripts under `<transcript-without-.jsonl>/subagents/**/agent-*.jsonl`
+    (the layout newer versions use, including nested workflow runs) are
+    discovered and folded in. A subagent's writes never also appear on the main
+    thread, so the merge is additive rather than double-counting.
+  - **opencode:** subagents run as child sessions, and the walk enumerates them
+    through the SDK client (`client.session.children` / `session.messages`),
+    **not** through the TUI's `api.state`. `api.state` holds only what the UI
+    has loaded, which for a child session is usually nothing; the client asks
+    the opencode server, which reads session storage directly, so the numbers
+    never depend on anyone opening a subagent in the UI. Child **diffs** are
+    deliberately not walked: opencode's session diff is a worktree comparison
+    that already contains what subagents wrote, so adding them would
+    double-count lines.
+
+  Both walks are bounded (depth, fan-out and file caps, cycle-proof) and degrade
+  to the old numbers rather than failing when a child session or sidecar is
+  unreadable.
+
+- **opencode now flags security-sensitive work it only read.** Sensitivity
+  (auth / data / infra, which triples the security role's multiplier from 0.05
+  to 0.15 of every implementation hour) was derived from the session diff alone,
+  so a subagent that _read_ auth code without writing it left the whole session
+  billing as routine. Read paths from every session, parent and subagent, now
+  feed the flags — as they always had on Claude Code. Worth $2,570 on the
+  opencode session measured above.
+
+### Added
+
+- `TranscriptStats.subagents` — how many distinct subagents contributed. Shown
+  as `Subagents: N` on the terminal receipt and in the opencode dialog, so it is
+  visible whether delegated work was actually picked up.
+- `listSubagentTranscripts()` and `transcriptSignature()` exported from the core
+  engine.
+- `opencode/plugins/subagents.ts` — the subagent walk, split out of the TUI
+  plugin so it is JSX-free and unit-testable. Every failure path in it is a
+  caught exception, so a wrong client call fails as a silent zero rather than a
+  crash; it is now covered by tests against a stub client, and its client type
+  is taken from the real SDK so a signature change breaks the build. That type
+  caught exactly such a bug during development — an earlier draft called
+  `session.children({ path: { id } })`, the wrong client flavour, and would have
+  reported zero subagents forever.
+
+### Changed
+
+- The status-line parse cache is keyed on mtime + size across the transcript
+  **and** its subagent sidecars. Keying on the parent alone served stale numbers
+  for the whole time a subagent ran, since only the sidecar was growing.
+- The opencode sidebar renders the parent's numbers immediately and folds in
+  subagent totals when the async walk lands. The walk is throttled to once every
+  4s while a turn is running, and forced on `session.idle` and on opening
+  `/realistic-cost`, so the receipt is never a stale number.
+
 ## [0.4.0] - 2026-08-25
 
 Distribution release. The project is now installable as a first-class Claude

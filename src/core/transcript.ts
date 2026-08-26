@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync, statSync, type Dirent } from "node:fs"
+import { join } from "node:path"
 import type { FileDomain, FileWriteOp, StatusLineInput, TranscriptStats } from "./types.js"
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,8 @@ interface TranscriptLine {
   toolUseResult?: unknown
   isMeta?: boolean
   isSidechain?: boolean
+  /** Identifies which subagent produced a sidechain line (newer transcripts). */
+  agentId?: string
 }
 
 function asArray<T>(x: T | T[] | undefined): T[] {
@@ -146,53 +149,90 @@ function isToolUse(b: ContentBlock): b is ToolUseBlock {
 }
 
 /**
+ * Every subagent sidecar transcript belonging to a session, sorted by path.
+ *
+ * Claude Code writes a subagent's turns to a sidecar JSONL next to the parent
+ * transcript: `<transcript-without-.jsonl>/subagents/**\/agent-*.jsonl`, one
+ * file per subagent, nested a further level for workflow runs
+ * (`subagents/workflows/<wf-id>/agent-*.jsonl`). Files that are not subagent
+ * transcripts (a workflow's `journal.jsonl`, the `.meta.json` sidecars) live in
+ * the same directories, so match on the `agent-` prefix rather than on
+ * `.jsonl` alone.
+ *
+ * Older Claude Code versions kept subagent turns inline in the parent file as
+ * `isSidechain: true` lines instead; those need no discovery and are handled
+ * by the parser directly.
+ */
+export function listSubagentTranscripts(transcriptPath: string): string[] {
+  if (!transcriptPath) return []
+  const root = join(transcriptPath.replace(/\.jsonl$/i, ""), "subagents")
+  const out: string[] = []
+  // Bounded walk: a runaway directory must not stall a status line that
+  // re-runs on every UI refresh.
+  const MAX_DEPTH = 6
+  const MAX_FILES = 1000
+  const walk = (dir: string, depth: number): void => {
+    if (depth > MAX_DEPTH || out.length >= MAX_FILES) return
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (out.length >= MAX_FILES) return
+      const full = join(dir, e.name)
+      if (e.isDirectory()) walk(full, depth + 1)
+      else if (e.isFile() && /^agent-.*\.jsonl$/i.test(e.name)) out.push(full)
+    }
+  }
+  walk(root, 0)
+  return out.sort()
+}
+
+/**
+ * A cheap fingerprint of everything `parseTranscript` will read: the parent
+ * transcript plus every subagent sidecar. Callers cache parse results against
+ * this, so a subagent appending to its own file still invalidates the cache
+ * even when the parent transcript has not moved for minutes.
+ */
+export function transcriptSignature(transcriptPath: string): string {
+  const parts: string[] = []
+  for (const p of [transcriptPath, ...listSubagentTranscripts(transcriptPath)]) {
+    try {
+      const st = statSync(p)
+      parts.push(`${p}:${st.mtimeMs}:${st.size}`)
+    } catch {
+      parts.push(`${p}:missing`)
+    }
+  }
+  return parts.join("|")
+}
+
+/**
  * Parse a Claude Code transcript JSONL file into TranscriptStats.
  *
  * The transcript is append-only JSONL; each line is a message (user/assistant/
  * system). Assistant messages carry tool_use blocks; user messages carry
  * tool_result blocks keyed by tool_use_id.
+ *
+ * Subagent work counts: a human team would have done it too. Sidechain lines
+ * in this file and every `subagents/` sidecar transcript are folded into the
+ * same stats. That is additive rather than double-counting — the parent thread
+ * records only the Task call and its text result, never the subagent's own
+ * writes.
  */
 export function parseTranscript(transcriptPath: string): TranscriptStats {
   const stats = emptyStats(transcriptPath)
+  const agents = new Set<string>()
 
-  let raw: string
-  try {
-    raw = readFileSync(transcriptPath, "utf8")
-  } catch (err) {
-    process.stderr.write(
-      `realistic-cost: cannot read transcript ${transcriptPath} (${err instanceof Error ? err.message : String(err)}) — falling back to empty stats\n`,
-    )
-    return stats
+  ingestTranscriptFile(stats, agents, transcriptPath, { warn: true })
+  for (const sub of listSubagentTranscripts(transcriptPath)) {
+    // One sidecar file is one subagent by construction, so the file itself is
+    // the identity — no need for the lines inside it to carry an agentId.
+    ingestTranscriptFile(stats, agents, sub, { warn: false, subagentKey: sub })
   }
-
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue
-    let entry: TranscriptLine
-    try {
-      entry = JSON.parse(line) as TranscriptLine
-    } catch {
-      continue
-    }
-    // Skip meta / sidechain (subagent) lines — we only want the main thread.
-    if (entry.isMeta || entry.isSidechain) continue
-
-    const role = entry.message?.role ?? entry.role ?? entry.type
-    // User-role tool_result lines don't change counts; results are already
-    // accounted for by the tool_use that produced them.
-    if (role !== "assistant") continue
-
-    stats.assistantTurns += 1
-    let hadThinking = false
-    for (const b of getBlocks(entry)) {
-      if (b?.type === "thinking") {
-        hadThinking = true
-        stats.thinkingTokens += Math.ceil(((b as ThinkingBlock).thinking ?? "").length / 4)
-      } else if (isToolUse(b)) {
-        recordToolCall(stats, b.name ?? "", b.input ?? {})
-      }
-    }
-    if (hadThinking) stats.thinkingTurns += 1
-  }
+  stats.subagents = agents.size
 
   applyPathFlags(stats, [...stats.fileWrites.map((w) => w.path), ...stats.filesReadPaths])
 
@@ -204,8 +244,77 @@ export function parseTranscript(transcriptPath: string): TranscriptStats {
   return stats
 }
 
+/**
+ * Fold one JSONL file's assistant turns into `stats`. `agents` collects an id
+ * per distinct subagent seen, so the caller can report how many contributed.
+ *
+ * `warn` is set only for the parent transcript: a missing sidecar is normal
+ * (the session simply spawned no subagents), a missing parent is worth saying.
+ * `subagentKey` names the one subagent a sidecar file belongs to; without it
+ * (the parent transcript) each sidechain line is attributed by its own
+ * `agentId`.
+ */
+function ingestTranscriptFile(
+  stats: TranscriptStats,
+  agents: Set<string>,
+  path: string,
+  { warn, subagentKey }: { warn: boolean; subagentKey?: string },
+): void {
+  let raw: string
+  try {
+    raw = readFileSync(path, "utf8")
+  } catch (err) {
+    if (warn) {
+      process.stderr.write(
+        `realistic-cost: cannot read transcript ${path} (${err instanceof Error ? err.message : String(err)}) — falling back to empty stats\n`,
+      )
+    }
+    return
+  }
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue
+    let entry: TranscriptLine
+    try {
+      entry = JSON.parse(line) as TranscriptLine
+    } catch {
+      continue
+    }
+    // Meta lines are harness bookkeeping, not work — still skipped.
+    if (entry.isMeta) continue
+
+    const role = entry.message?.role ?? entry.role ?? entry.type
+    // User-role tool_result lines don't change counts; results are already
+    // accounted for by the tool_use that produced them.
+    if (role !== "assistant") continue
+
+    stats.assistantTurns += 1
+    // Attribute the turn to a subagent, if it came from one. `agentId` is
+    // absent on older inline-sidechain transcripts, so the file is the
+    // fallback identity there too.
+    if (subagentKey) agents.add(subagentKey)
+    else if (entry.isSidechain) {
+      agents.add(typeof entry.agentId === "string" && entry.agentId ? entry.agentId : path)
+    }
+    let hadThinking = false
+    for (const b of getBlocks(entry)) {
+      if (b?.type === "thinking") {
+        hadThinking = true
+        stats.thinkingTokens += Math.ceil(((b as ThinkingBlock).thinking ?? "").length / 4)
+      } else if (isToolUse(b)) {
+        recordToolCall(stats, b.name ?? "", b.input ?? {})
+      }
+    }
+    if (hadThinking) stats.thinkingTurns += 1
+  }
+}
+
 function recordToolCall(stats: TranscriptStats, name: string, input: Record<string, unknown>): void {
   stats.toolCalls.total += 1
+  // Cross-team tagging is deliberately NOT one of the buckets below: an MCP
+  // call is still a read, a search or a fetch for the purpose of work time.
+  // It just costs extra coordination on top.
+  recordMcpCall(stats, name)
   // Harnesses disagree on tool-name casing (Claude Code "Edit", opencode
   // "edit"), so match on a single normalized form.
   switch (name.toLowerCase()) {
@@ -245,9 +354,60 @@ function recordToolCall(stats: TranscriptStats, name: string, input: Record<stri
       stats.toolCalls.task += 1
       break
     default:
-      stats.toolCalls.other += 1
+      if (isWebTool(name)) stats.toolCalls.web += 1
+      else stats.toolCalls.other += 1
       break
   }
+}
+
+/**
+ * Whether a tool call is a web request — a fetch or a search that returns a
+ * page to read, rather than a local file or command.
+ *
+ * Matched on a normalized substring so plugin- and MCP-prefixed variants
+ * (`mcp__something__webfetch`) count too, since the reading cost is the same
+ * whoever wrapped the call.
+ */
+/**
+ * The MCP server behind a tool call, or "" if the call was a local tool.
+ *
+ * Claude Code names MCP tools `mcp__<server>__<tool>`, which is unambiguous.
+ * opencode flattens them to `<server>_<tool>`, which is NOT — `pty_spawn` and
+ * `graphify_recall` look identical, and only one of them is another team. So
+ * the caller may pass the servers it knows are configured, and a flattened
+ * name is only treated as MCP when it matches one of them. Given no list,
+ * opencode-style calls stay unattributed rather than being guessed at: over-
+ * counting departments would inflate the bill on every plugin tool.
+ */
+export function mcpServerOf(name: string, knownServers: readonly string[] = []): string {
+  const explicit = /^mcp__([^_].*?)__/.exec(name)
+  if (explicit?.[1]) return explicit[1]
+  for (const server of knownServers) {
+    if (!server) continue
+    if (name === server || name.startsWith(server + "_")) return server
+  }
+  return ""
+}
+
+export function isWebTool(name: string): boolean {
+  const n = name.toLowerCase().replace(/[^a-z]/g, "")
+  return n.includes("webfetch") || n.includes("websearch")
+}
+
+/**
+ * Tag a tool call as cross-team if it went to an MCP server, tracking the
+ * distinct servers so the management cost can be charged per department
+ * rather than per request.
+ */
+export function recordMcpCall(
+  stats: Pick<TranscriptStats, "mcpCalls" | "mcpServers">,
+  name: string,
+  knownServers: readonly string[] = [],
+): void {
+  const server = mcpServerOf(name, knownServers)
+  if (!server) return
+  stats.mcpCalls += 1
+  if (!stats.mcpServers.includes(server)) stats.mcpServers.push(server)
 }
 
 /**
@@ -315,10 +475,13 @@ export function buildStatsFromStatusLine(input: StatusLineInput): TranscriptStat
 export function emptyStats(transcriptPath = ""): TranscriptStats {
   return {
     transcriptPath,
-    toolCalls: { read: 0, write: 0, edit: 0, glob: 0, grep: 0, bash: 0, task: 0, other: 0, total: 0 },
+    toolCalls: { read: 0, write: 0, edit: 0, glob: 0, grep: 0, bash: 0, task: 0, web: 0, other: 0, total: 0 },
     thinkingTurns: 0,
     thinkingTokens: 0,
     assistantTurns: 0,
+    subagents: 0,
+    mcpCalls: 0,
+    mcpServers: [],
     fileWrites: [],
     filesReadPaths: [],
     durationMs: 0,

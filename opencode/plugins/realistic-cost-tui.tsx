@@ -19,6 +19,18 @@ import {
   type TranscriptStats,
 } from "pre_ai_dev_cost_receipt/core"
 
+import {
+  emptySubagentTotals,
+  fetchSubagentTotals,
+  mergeSubagents,
+  recordParts,
+  spanOf,
+  widen,
+  type OpencodeClient,
+  type SubagentTotals,
+  type Window,
+} from "./subagents.ts"
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SESSION BRIDGE — opencode state → TranscriptStats
 //
@@ -30,23 +42,49 @@ import {
 
 interface SessionApi {
   state: {
+    readonly path: { directory: string }
+    /** Configured MCP servers — the only reliable way to tell an MCP call
+     *  from a builtin here, since opencode flattens both to `name_tool`. */
+    mcp(): readonly { name?: string }[]
     session: {
       diff(sessionID: string): { file?: string; additions?: number; deletions?: number }[] | undefined
       messages(sessionID: string): unknown[] | undefined
     }
     part(messageID: string): unknown[] | undefined
   }
+  /**
+   * The opencode SDK client. It talks to the opencode server, which reads
+   * straight from session storage — so unlike `api.state`, it can see sessions
+   * the TUI has never opened. Subagent numbers depend on this, not on the UI.
+   *
+   * Taken from the real plugin API type rather than hand-rolled: `api` reaches
+   * this bridge through a cast, which would happily hide a signature change,
+   * and a signature change here means subagent work silently stops being
+   * counted. Better a build error than a quietly halved bill.
+   */
+  client: OpencodeClient
+}
+
+/** Names of the MCP servers opencode currently has configured. */
+function mcpServerNames(api: SessionApi): string[] {
+  try {
+    return (api.state.mcp() ?? []).map((m) => m?.name ?? "").filter((n) => n.length > 0)
+  } catch {
+    return []
+  }
 }
 
 function buildStatsFromSession(
   api: SessionApi,
   sessionID: string,
-): { stats: TranscriptStats; aiCost: number } {
+): { stats: TranscriptStats; aiCost: number; window: Window } {
   const stats = emptyStats()
+  const mcpServers = mcpServerNames(api)
 
   // 1. Diff → file writes + lines. opencode reports a per-file additions /
   //    deletions summary rather than individual tool inputs, so each changed
-  //    file becomes one "Edit"-shaped write op.
+  //    file becomes one "Edit"-shaped write op. This is the whole worktree, so
+  //    it already includes what subagents wrote (see SubagentTotals).
   try {
     const diff = api.state.session.diff(sessionID) ?? []
     for (const item of diff) {
@@ -69,10 +107,10 @@ function buildStatsFromSession(
     // A session with no diff yet is normal, not an error.
   }
 
-  // 2. Messages + parts → tool calls, thinking, AI cost, duration.
+  // 2. Messages + parts → tool calls, thinking, AI cost, duration. Parent
+  //    session only; subagents are fetched separately and asynchronously.
+  const window: Window = { first: 0, last: 0 }
   let aiCost = 0
-  let firstCreated = 0
-  let lastCompleted = 0
   try {
     for (const raw of api.state.session.messages(sessionID) ?? []) {
       const msg = raw as {
@@ -82,10 +120,7 @@ function buildStatsFromSession(
         time?: { created?: number; completed?: number }
       }
       const role = msg.info?.role ?? msg.role
-      const created = msg.info?.time?.created ?? msg.time?.created ?? 0
-      const completed = msg.info?.time?.completed ?? msg.time?.completed ?? 0
-      if (created && (!firstCreated || created < firstCreated)) firstCreated = created
-      if (completed && completed > lastCompleted) lastCompleted = completed
+      widen(window, msg.info?.time ?? msg.time)
 
       if (role !== "assistant") continue
       stats.assistantTurns += 1
@@ -93,17 +128,7 @@ function buildStatsFromSession(
       if (!msgId) continue
 
       try {
-        for (const rawPart of api.state.part(msgId) ?? []) {
-          const part = rawPart as { type?: string; tool?: string; text?: string; cost?: number }
-          if (part.type === "tool") {
-            recordOpencodeTool(stats, part.tool ?? "")
-          } else if (part.type === "reasoning") {
-            stats.thinkingTurns += 1
-            stats.thinkingTokens += Math.ceil((part.text ?? "").length / 4)
-          } else if (part.type === "step-finish") {
-            aiCost += part.cost ?? 0
-          }
-        }
+        aiCost += recordParts(stats, api.state.part(msgId) ?? [], mcpServers)
       } catch {
         // Parts for an in-flight message may not be readable yet.
       }
@@ -111,53 +136,25 @@ function buildStatsFromSession(
   } catch {
     // No session state available — fall through with zeroed stats.
   }
+  // Files this session only read never appear in the diff, but still decide
+  // whether the work counts as security-sensitive.
+  applyPathFlags(stats, stats.filesReadPaths)
 
-  stats.durationMs = firstCreated && lastCompleted ? lastCompleted - firstCreated : 0
-  return { stats, aiCost }
+  stats.durationMs = spanOf(window)
+  return { stats, aiCost, window }
 }
 
-/** opencode's tool names, mapped onto the engine's tool-call buckets. */
-function recordOpencodeTool(stats: TranscriptStats, tool: string): void {
-  stats.toolCalls.total += 1
-  switch (tool.toLowerCase()) {
-    case "read":
-      stats.toolCalls.read += 1
-      break
-    case "write":
-      stats.toolCalls.write += 1
-      break
-    case "edit":
-    case "multiedit":
-    case "patch":
-      stats.toolCalls.edit += 1
-      break
-    case "glob":
-    case "list":
-      stats.toolCalls.glob += 1
-      break
-    case "grep":
-    case "search":
-      stats.toolCalls.grep += 1
-      break
-    case "bash":
-    case "pty":
-      stats.toolCalls.bash += 1
-      break
-    case "task":
-      stats.toolCalls.task += 1
-      break
-    default:
-      stats.toolCalls.other += 1
-      break
-  }
-}
-
-function buildReport(api: SessionApi, sessionID: string): CostReport | null {
-  const { stats, aiCost } = buildStatsFromSession(api, sessionID)
+function buildReport(api: SessionApi, sessionID: string, subs: SubagentTotals): CostReport | null {
+  const { stats, aiCost, window } = buildStatsFromSession(api, sessionID)
+  mergeSubagents(stats, subs, window)
   const nothingHappened =
     stats.fileWrites.length === 0 && stats.linesAdded === 0 && stats.toolCalls.total === 0
   if (nothingHappened) return null
-  return computeCost({ stats, estimate: estimateHours(stats), options: { aiCost } })
+  return computeCost({
+    stats,
+    estimate: estimateHours(stats),
+    options: { aiCost: aiCost + subs.aiCost },
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -240,23 +237,91 @@ function activityRows(theme: Theme, items: ActivityCost[], currency: string, ind
 // PLUGIN
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * How often the subagent walk may re-query the server while a session is
+ * running. `message.updated` fires many times a second; refetching every
+ * child session that often would be the most expensive thing this plugin
+ * does. Every idle event forces a refresh regardless, so the final number is
+ * always current.
+ */
+const SUBAGENT_REFRESH_MS = 4000
+
 const tui: TuiPluginModule["tui"] = async (api) => {
   const [report, setReport] = createSignal<CostReport | null>(null)
 
-  function recompute() {
+  // Subagent totals per session, so switching sessions never shows another
+  // session's numbers and switching back does not start from zero.
+  const subagentsBySession = new Map<string, SubagentTotals>()
+  // Throttle per session, not globally: switching sessions must never be
+  // throttled away by a fetch that belonged to the session you just left.
+  const lastFetchBySession = new Map<string, number>()
+  let subagentFetchInFlight = false
+  let forceAfterInFlight = ""
+
+  function currentSessionID(): string {
+    // The route union has a catch-all member, so `name === "session"` alone
+    // does not narrow params — check the field we actually need.
+    const route = api.route.current
+    const sessionID = route?.name === "session" ? route.params?.sessionID : undefined
+    return typeof sessionID === "string" ? sessionID : ""
+  }
+
+  function render(sessionID: string) {
     try {
-      const route = api.route.current
-      // The route union has a catch-all member, so `name === "session"` alone
-      // does not narrow params — check the field we actually need.
-      const sessionID = route?.name === "session" ? route.params?.sessionID : undefined
-      if (typeof sessionID !== "string" || !sessionID) {
-        setReport(null)
-        return
-      }
-      setReport(buildReport(api as unknown as SessionApi, sessionID))
+      const subs = subagentsBySession.get(sessionID) ?? emptySubagentTotals()
+      setReport(buildReport(api as unknown as SessionApi, sessionID, subs))
     } catch {
       setReport(null)
     }
+  }
+
+  /**
+   * Re-read this session's subagents from the server and re-render. Throttled
+   * unless `force`; a failure keeps the last known totals rather than dropping
+   * subagent work back to zero.
+   */
+  async function refreshSubagents(sessionID: string, force: boolean) {
+    if (!sessionID) return
+    if (subagentFetchInFlight) {
+      // A forced refresh must not be lost to a throttled one already running:
+      // that in-flight fetch may have started before the subagents finished,
+      // and idle is the moment the totals become final. Re-run it after.
+      if (force) forceAfterInFlight = sessionID
+      return
+    }
+    const now = Date.now()
+    if (!force && now - (lastFetchBySession.get(sessionID) ?? 0) < SUBAGENT_REFRESH_MS) return
+    subagentFetchInFlight = true
+    lastFetchBySession.set(sessionID, now)
+    try {
+      const bridge = api as unknown as SessionApi
+      const totals = await fetchSubagentTotals(
+        bridge.client,
+        sessionID,
+        bridge.state.path.directory,
+        mcpServerNames(bridge),
+      )
+      subagentsBySession.set(sessionID, totals)
+      // The user may have navigated away while this was in flight.
+      if (currentSessionID() === sessionID) render(sessionID)
+    } catch {
+      // Server unreachable — keep whatever we last knew.
+    } finally {
+      subagentFetchInFlight = false
+      const deferred = forceAfterInFlight
+      forceAfterInFlight = ""
+      if (deferred) void refreshSubagents(deferred, true)
+    }
+  }
+
+  function recompute() {
+    const sessionID = currentSessionID()
+    if (!sessionID) {
+      setReport(null)
+      return
+    }
+    render(sessionID)
+    void refreshSubagents(sessionID, false)
   }
 
   // Recompute on session/message events, coalesced into one pass per tick.
@@ -276,7 +341,12 @@ const tui: TuiPluginModule["tui"] = async (api) => {
   const unsubscribes = [
     api.event.on("message.updated", scheduleRecompute),
     api.event.on("session.updated", scheduleRecompute),
-    api.event.on("session.idle", scheduleRecompute),
+    // Idle means the turn (and any subagent it spawned) has finished, so this
+    // is the one refresh that must not be throttled away.
+    api.event.on("session.idle", () => {
+      void refreshSubagents(currentSessionID(), true)
+      scheduleRecompute()
+    }),
   ]
   api.lifecycle.onDispose(() => {
     for (const unsubscribe of unsubscribes) unsubscribe()
@@ -358,6 +428,10 @@ const tui: TuiPluginModule["tui"] = async (api) => {
             slashName: "realistic-cost",
             slashAliases: ["preai", "pa"],
             run: () => {
+              // The receipt is the number people quote, so pull the subagent
+              // totals fresh rather than serving whatever the throttle last
+              // allowed. The dialog re-renders when it lands.
+              void refreshSubagents(currentSessionID(), true)
               const r = report()
               if (!r || r.totalCost === 0) {
                 api.ui.dialog.replace(() => (
@@ -494,6 +568,14 @@ function ReviewDialog(props: { report: CostReport; theme: Theme }): JSX.Element 
         <box flexDirection="row" gap={1}>
           <text fg={theme.textMuted}>AI cost:</text>
           <text fg={theme.success}>{formatMoneyPrecise(r.aiCost, r.currency)}</text>
+        </box>
+      ) : null}
+      {r.stats.subagents > 0 ? (
+        <box flexDirection="row" gap={1}>
+          <text fg={theme.textMuted}>Includes:</text>
+          <text fg={theme.text}>
+            {r.stats.subagents} subagent{r.stats.subagents === 1 ? "" : "s"}
+          </text>
         </box>
       ) : null}
       <text> </text>

@@ -1,9 +1,17 @@
 import { test } from "node:test"
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs"
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { strictEqual } from "node:assert"
-import { parseTranscript, emptyStats, parseStatusLineStdin, classifyDomain } from "../src/core/index.js"
+import { strictEqual, deepStrictEqual, ok } from "node:assert"
+import {
+  parseTranscript,
+  emptyStats,
+  parseStatusLineStdin,
+  classifyDomain,
+  listSubagentTranscripts,
+  mcpServerOf,
+  transcriptSignature,
+} from "../src/core/index.js"
 
 function jsonl(lines: unknown[]): string {
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n"
@@ -180,17 +188,107 @@ test("MultiEdit sums across its edits array", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Sidechain / meta exclusion
+// Subagent work counts; meta lines do not
+//
+// A subagent's writes appear ONLY on its own sidechain — the parent thread
+// records just the Task call and its text result. Dropping them priced a
+// delegating session as if the delegated work never happened.
 // ---------------------------------------------------------------------------
 
-test("subagent (sidechain) and meta lines are excluded from the main thread", () => {
+test("inline sidechain (subagent) lines are counted; meta lines are not", () => {
   const main = assistantWrite("src/main.ts", "a\n", "m1")
-  const sidechain = { ...assistantWrite("src/subagent.ts", "b\n", "s1"), isSidechain: true }
+  const sidechain = {
+    ...assistantWrite("src/subagent.ts", "b\n", "s1"),
+    isSidechain: true,
+    agentId: "agent-1",
+  }
   const meta = { ...assistantWrite("src/meta.ts", "c\n", "x1"), isMeta: true }
   withTempTranscript(jsonl([main, sidechain, meta]), (tp) => {
     const s = parseTranscript(tp)
-    strictEqual(s.fileWrites.length, 1)
-    strictEqual(s.fileWrites[0].path, "src/main.ts")
+    strictEqual(s.fileWrites.length, 2)
+    deepStrictEqual(s.fileWrites.map((w) => w.path).sort(), ["src/main.ts", "src/subagent.ts"])
+    strictEqual(s.subagents, 1)
+  })
+})
+
+test("distinct inline agentIds count as distinct subagents", () => {
+  const lines = [
+    assistantWrite("src/main.ts", "a\n", "m1"),
+    { ...assistantWrite("src/a.ts", "b\n", "s1"), isSidechain: true, agentId: "agent-1" },
+    { ...assistantWrite("src/b.ts", "c\n", "s2"), isSidechain: true, agentId: "agent-1" },
+    { ...assistantWrite("src/c.ts", "d\n", "s3"), isSidechain: true, agentId: "agent-2" },
+  ]
+  withTempTranscript(jsonl(lines), (tp) => {
+    strictEqual(parseTranscript(tp).subagents, 2)
+  })
+})
+
+/**
+ * Newer Claude Code keeps each subagent in its own sidecar transcript under
+ * `<transcript-without-.jsonl>/subagents/`, nested one level deeper for
+ * workflow runs. `journal.jsonl` and `.meta.json` share those directories and
+ * must not be parsed as transcripts.
+ */
+function withSubagentTranscripts(
+  main: string,
+  sidecars: Record<string, string>,
+  fn: (path: string) => void,
+): void {
+  const dir = mkdtempSync(join(tmpdir(), "rc-sa-"))
+  const tp = join(dir, "session.jsonl")
+  writeFileSync(tp, main, "utf8")
+  for (const [rel, content] of Object.entries(sidecars)) {
+    const full = join(dir, "session", "subagents", rel)
+    mkdirSync(join(full, ".."), { recursive: true })
+    writeFileSync(full, content, "utf8")
+  }
+  try {
+    fn(tp)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test("sidecar subagent transcripts are discovered and folded in", () => {
+  const main = jsonl([assistantWrite("src/main.ts", "a\n", "m1")])
+  const sub = (path: string, id: string) =>
+    jsonl([{ ...assistantWrite(path, "x\ny\n", id), isSidechain: true, agentId: id }])
+  withSubagentTranscripts(
+    main,
+    {
+      "agent-a1.jsonl": sub("src/one.ts", "a1"),
+      "workflows/wf_1/agent-a2.jsonl": sub("src/two.ts", "a2"),
+      // Neither of these is a subagent transcript.
+      "workflows/wf_1/journal.jsonl": jsonl([assistantWrite("src/nope.ts", "z\n", "j1")]),
+      "workflows/wf_1/agent-a2.meta.json": JSON.stringify({ agentType: "general-purpose" }),
+    },
+    (tp) => {
+      const s = parseTranscript(tp)
+      deepStrictEqual(s.fileWrites.map((w) => w.path).sort(), ["src/main.ts", "src/one.ts", "src/two.ts"])
+      strictEqual(s.subagents, 2)
+      strictEqual(s.linesAdded, 5)
+      strictEqual(listSubagentTranscripts(tp).length, 2)
+    },
+  )
+})
+
+test("a session with no subagents reports none and discovers no sidecars", () => {
+  withTempTranscript(jsonl([assistantWrite("src/main.ts", "a\n", "m1")]), (tp) => {
+    strictEqual(parseTranscript(tp).subagents, 0)
+    deepStrictEqual(listSubagentTranscripts(tp), [])
+  })
+})
+
+test("the cache signature changes when a subagent transcript changes", () => {
+  const main = jsonl([assistantWrite("src/main.ts", "a\n", "m1")])
+  withSubagentTranscripts(main, { "agent-a1.jsonl": "" }, (tp) => {
+    const before = transcriptSignature(tp)
+    writeFileSync(
+      join(tp.replace(/\.jsonl$/, ""), "subagents", "agent-a1.jsonl"),
+      jsonl([{ ...assistantWrite("src/one.ts", "x\n", "a1"), isSidechain: true, agentId: "a1" }]),
+      "utf8",
+    )
+    ok(transcriptSignature(tp) !== before, "signature must track sidecar changes")
   })
 })
 
@@ -259,4 +357,60 @@ test("data-engineering paths classify as the data domain", () => {
   strictEqual(classifyDomain("src/api/server.ts"), "backend")
   // Tests and docs still win over data.
   strictEqual(classifyDomain("test/migrations.test.ts"), "test")
+})
+
+// ---------------------------------------------------------------------------
+// MCP calls — another department's system
+// ---------------------------------------------------------------------------
+
+test("mcp__server__tool calls are attributed to their server", () => {
+  strictEqual(mcpServerOf("mcp__graphify__graphify_find"), "graphify")
+  strictEqual(mcpServerOf("mcp__claude-in-chrome__navigate"), "claude-in-chrome")
+  strictEqual(mcpServerOf("Read"), "", "a local tool is not another department")
+  strictEqual(mcpServerOf("Bash"), "")
+})
+
+test("opencode's flattened names need the configured server list to be recognized", () => {
+  // `pty_spawn` and `graphify_recall` are indistinguishable by shape, and only
+  // one of them is another team — so without the list, neither is guessed at.
+  strictEqual(mcpServerOf("graphify_recall"), "")
+  strictEqual(mcpServerOf("graphify_recall", ["graphify"]), "graphify")
+  strictEqual(mcpServerOf("pty_spawn", ["graphify"]), "", "a plugin tool must not inflate the bill")
+  strictEqual(mcpServerOf("deja", ["deja"]), "deja", "a bare server name counts too")
+})
+
+test("a transcript's MCP calls and distinct servers are counted", () => {
+  const lines = [
+    toolUse("mcp__graphify__graphify_find", {}, "t1"),
+    toolUse("mcp__graphify__graphify_callers", {}, "t2"),
+    toolUse("mcp__posthog__exec", {}, "t3"),
+    toolUse("Read", { file_path: "src/a.ts" }, "t4"),
+  ]
+  withTempTranscript(jsonl(lines), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.mcpCalls, 3)
+    deepStrictEqual(s.mcpServers.sort(), ["graphify", "posthog"])
+    // MCP tagging must not disturb the work-time buckets.
+    strictEqual(s.toolCalls.total, 4)
+    strictEqual(s.toolCalls.read, 1)
+  })
+})
+
+test("an MCP web tool counts as both a web request and a cross-department call", () => {
+  withTempTranscript(jsonl([toolUse("mcp__exa__websearch", {}, "t1")]), (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.toolCalls.web, 1, "still billed at web read time")
+    strictEqual(s.mcpCalls, 1, "and still another department")
+    deepStrictEqual(s.mcpServers, ["exa"])
+  })
+})
+
+test("subagent MCP calls count toward the session's departments", () => {
+  const main = jsonl([toolUse("Read", { file_path: "a.ts" }, "m1")])
+  const sub = jsonl([{ ...toolUse("mcp__graphify__recall", {}, "s1"), isSidechain: true, agentId: "a1" }])
+  withSubagentTranscripts(main, { "agent-a1.jsonl": sub }, (tp) => {
+    const s = parseTranscript(tp)
+    strictEqual(s.mcpCalls, 1)
+    deepStrictEqual(s.mcpServers, ["graphify"])
+  })
 })

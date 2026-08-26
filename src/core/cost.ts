@@ -80,11 +80,11 @@ function computeActivities(
   rates: Record<RoleId, number>,
   o: Required<EstimateOptions>,
 ): ActivityCost[] {
-  const searchReadHours =
-    (stats.toolCalls.glob + stats.toolCalls.grep) * o.discoverySearchHours +
-    stats.toolCalls.read * o.discoveryReadHours
-  const engineerReadHours = searchReadHours * 0.5
-
+  // Taken from the estimate rather than recomputed: this used to restate the
+  // formula, which is exactly how a receipt drifts from the role model it is
+  // supposed to describe.
+  const toolWorkHours = est.toolWorkHours
+  const comprehensionHours = est.comprehensionHours
   const reMap = new Map(est.roles.map((r) => [r.role, r]))
   const implH = (id: RoleId) => reMap.get(id)?.implementationHours ?? 0
   const ohH = (id: RoleId) => reMap.get(id)?.overheadHours ?? 0
@@ -117,8 +117,12 @@ function computeActivities(
   const engAverageRate = (rates.backend + rates.frontend + rates.fullstack) / 3
   const blendedRate = codingTotalHours > 0 ? codingTotalCost / codingTotalHours : engAverageRate
 
-  let codingHours = codingTotalHours - engineerReadHours
-  let codingCost = codingTotalCost - engineerReadHours * blendedRate
+  // Tool work and comprehension were folded into the engineering roles'
+  // implementation hours, so subtracting them back out leaves the hours that
+  // came from lines of code.
+  const nonCoding = toolWorkHours + comprehensionHours
+  let codingHours = codingTotalHours - nonCoding
+  let codingCost = codingTotalCost - nonCoding * blendedRate
   if (codingHours <= 0.01 && stats.toolCalls.write + stats.toolCalls.edit > 0) {
     codingHours = stats.toolCalls.write * 0.5 + stats.toolCalls.edit * 0.3
     codingCost = codingHours * blendedRate
@@ -130,9 +134,23 @@ function computeActivities(
   const valueActs = displayable([
     { activity: "Thinking", hours: thinkingCost / blendedRate, cost: thinkingCost, section: "value" },
     {
+      activity: "Tool Work",
+      hours: toolWorkHours,
+      cost: toolWorkHours * blendedRate,
+      section: "value",
+    },
+    {
       activity: "Code Comprehension",
-      hours: engineerReadHours,
-      cost: engineerReadHours * blendedRate,
+      hours: comprehensionHours,
+      cost: comprehensionHours * blendedRate,
+      section: "value",
+    },
+    // Work the OTHER department actually performed to satisfy our MCP calls.
+    // Value creation — someone did it — but not by our team.
+    {
+      activity: "Other Dept Work (MCP)",
+      hours: est.mcpDepartmentWorkHours,
+      cost: est.mcpDepartmentWorkHours * blendedRate,
       section: "value",
     },
     { activity: "Coding", hours: codingHours, cost: codingCost, section: "value" },
@@ -150,6 +168,17 @@ function computeActivities(
       section: "value",
     },
     { activity: "QA & Testing", hours: ohH("qa"), cost: ohH("qa") * rates.qa, section: "value" },
+    // The technical writer's whole role: docs the session wrote, plus review
+    // and the changelog/API-doc overhead. Unlike every other engineering role,
+    // none of it is folded into Coding or Peer Review — those cover
+    // BE/FE/FS/devops/data/qa only — so without this line documentation work
+    // is priced at zero in the receipt while still showing in the roles table.
+    {
+      activity: "Documentation",
+      hours: implH("techwriter") + ohH("techwriter"),
+      cost: (implH("techwriter") + ohH("techwriter")) * rates.techwriter,
+      section: "value",
+    },
     { activity: "DevOps & Infra", hours: deployHours, cost: deployHours * rates.devops, section: "value" },
     {
       activity: "Security Review",
@@ -177,11 +206,50 @@ function computeActivities(
   const T = (X + mgmtTotal) / (1 - COORDINATION_TAX_SHARE)
   const bucketCost = (COORDINATION_TAX_SHARE * T) / COORDINATION_BUCKETS
   const bucketHours = bucketCost / blendedRate
+  // Per-tool-call email and meeting time sits ON TOP of the flat tax: the tax
+  // is the standing cost of being on a team, this is the correspondence a
+  // specific piece of work generates. Adding it to the tax base instead would
+  // compound coordination onto coordination.
+  const toolCoordHours = est.toolCoordinationHours
   const coordActs = displayable([
     { activity: "Meeting w/ Eng Manager", hours: bucketHours, cost: bucketCost, section: "coordination" },
     { activity: "Meeting w/ PM", hours: bucketHours, cost: bucketCost, section: "coordination" },
     { activity: "Meeting w/ DevOps", hours: bucketHours, cost: bucketCost, section: "coordination" },
     { activity: "Issue Management", hours: bucketHours, cost: bucketCost, section: "coordination" },
+    {
+      activity: "Emails & Follow-ups",
+      hours: toolCoordHours,
+      cost: toolCoordHours * blendedRate,
+      section: "coordination",
+    },
+    // Cross-team lines. Both are "another team" costs: the standing tax above
+    // covers your own team's meetings, these cover everyone else's.
+    {
+      activity: "Cross-Team Sync (MCP)",
+      hours: est.mcpCoordinationHours,
+      cost: est.mcpCoordinationHours * blendedRate,
+      section: "coordination",
+    },
+    {
+      activity: "Subagent Team Coordination",
+      hours: est.subagentCoordinationHours,
+      cost: est.subagentCoordinationHours * blendedRate,
+      section: "coordination",
+    },
+    // The dev sits in the cross-department meetings too. Engineering time that
+    // generates nothing, so it belongs here rather than in Value Creation.
+    // Priced at the rates of the roles that actually carry these hours, not at
+    // the blended rate: these hours also sit in those roles' overhead, and the
+    // receipt and the roles table must not disagree about the same cost.
+    {
+      activity: "Eng in Cross-Dept Meetings",
+      hours: est.mcpEngineeringHours,
+      cost: Object.entries(est.mcpEngineeringHoursByRole).reduce(
+        (sum, [role, hours]) => sum + (hours ?? 0) * rates[role as RoleId],
+        0,
+      ),
+      section: "coordination",
+    },
   ])
 
   const acts = [...mgmtActs, ...valueActs, ...coordActs]

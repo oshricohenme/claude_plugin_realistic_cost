@@ -14,8 +14,8 @@
     "allowImportingTsExtensions": true,
     "types": ["node"],
     "paths": {
-      "realistic-cost/core": ["./src/core/index.ts"]
+      "pre_ai_dev_cost_receipt/core": ["./src/core/index.ts"]
     }
   },
-  "include": ["opencode/plugins/**/*.tsx"]
+  "include": ["opencode/plugins/**/*.ts", "opencode/plugins/**/*.tsx"]
 }

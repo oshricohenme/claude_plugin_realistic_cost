@@ -7,8 +7,19 @@ export {
   parseStatusLineStdin,
   buildStatsFromStatusLine,
   emptyStats,
+  isWebTool,
+  mcpServerOf,
+  recordMcpCall,
+  listSubagentTranscripts,
+  transcriptSignature,
 } from "./transcript.js"
-export { estimateHours, resolveEstimateOptions, ESTIMATE_DEFAULTS } from "./estimate.js"
+export {
+  estimateHours,
+  resolveEstimateOptions,
+  webRequestHours,
+  variableHours,
+  ESTIMATE_DEFAULTS,
+} from "./estimate.js"
 export { computeCost, filterActivities } from "./cost.js"
 export {
   formatStatusLine,
